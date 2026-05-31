@@ -1,0 +1,157 @@
+version: '3'
+
+dotenv: ['.env']
+
+vars:
+  GO: '{{.GO | default "go"}}'
+  GOLANGCI_LINT: '{{.GOLANGCI_LINT | default "golangci-lint"}}'
+  STRIPE: '{{.STRIPE | default "stripe"}}'
+  LISTEN_ADDR: '{{.LISTEN_ADDR | default ":8080"}}'
+
+tasks:
+  default:
+    desc: Run vet and tests (the standard pre-commit check)
+    deps: [vet, test]
+
+  # --- Local end-to-end dev flow ---
+
+  dev:
+    desc: Run the example server with .env loaded (terminal B in the e2e flow)
+    cmds:
+      - '{{.GO}} run ./examples/nethttp-server'
+
+  stripe:secret:
+    desc: Print the persistent Stripe CLI webhook signing secret — paste into STRIPE_WEBHOOK_SECRET in .env (one-time per account)
+    cmds:
+      - '{{.STRIPE}} listen --print-secret'
+
+  stripe:listen:
+    desc: Forward live Stripe webhook events to the local server (terminal A)
+    cmds:
+      - '{{.STRIPE}} listen --forward-to localhost{{.LISTEN_ADDR}}/webhooks/stripe'
+
+  stripe:trigger:
+    desc: Fire a synthetic invoice.finalized event (terminal C). Override with EVENT=...
+    vars:
+      EVENT: '{{.EVENT | default "invoice.finalized"}}'
+    cmds:
+      - '{{.STRIPE}} trigger {{.EVENT}}'
+
+  nav:status:
+    desc: 'Query NAV /queryTransactionStatus for a transaction id. Usage: task nav:status TX=5EE7G1KH050R7P6K'
+    vars:
+      TX: '{{.TX}}'
+    preconditions:
+      - sh: 'test -n "{{.TX}}"'
+        msg: 'TX is required. Usage: task nav:status TX=<transactionId>'
+    cmds:
+      - '{{.GO}} run ./examples/nav-status {{.TX}}'
+
+  stripe:scenario:void:
+    desc: Create + finalize + void one real invoice end-to-end (so NAV sees CREATE then a void for the same number)
+    vars:
+      EMAIL: '{{.EMAIL | default "ev-test@example.com"}}'
+      AMOUNT: '{{.AMOUNT | default "5000"}}'
+      CURRENCY: '{{.CURRENCY | default "huf"}}'
+      SLEEP: '{{.SLEEP | default "8"}}'
+    preconditions:
+      - sh: command -v jq >/dev/null
+        msg: 'jq is required (brew install jq)'
+    cmds:
+      - |
+        set -euo pipefail
+        CUSTOMER=$({{.STRIPE}} customers create -d email='{{.EMAIL}}' -d name='Test E.V.' | jq -r .id)
+        echo "customer = $CUSTOMER"
+        {{.STRIPE}} invoice_items create \
+          -d customer="$CUSTOMER" \
+          -d amount={{.AMOUNT}} \
+          -d currency={{.CURRENCY}} \
+          -d description='Bridge test line' > /dev/null
+        INVOICE=$({{.STRIPE}} invoices create -d customer="$CUSTOMER" | jq -r .id)
+        echo "invoice  = $INVOICE"
+        {{.STRIPE}} invoices finalize_invoice "$INVOICE" > /dev/null
+        echo "finalized — sleeping {{.SLEEP}}s so the bridge can CREATE on NAV"
+        sleep {{.SLEEP}}
+        {{.STRIPE}} invoices void_invoice "$INVOICE" > /dev/null
+        echo "voided $INVOICE — bridge should now hit /manageAnnulment for the same number"
+
+  stripe:scenario:creditnote:
+    desc: Create + finalize + pay + issue a (partial) credit note for one real invoice
+    vars:
+      EMAIL: '{{.EMAIL | default "ev-test@example.com"}}'
+      AMOUNT: '{{.AMOUNT | default "5000"}}'
+      CREDIT_AMOUNT: '{{.CREDIT_AMOUNT | default "1500"}}'
+      CURRENCY: '{{.CURRENCY | default "huf"}}'
+      SLEEP: '{{.SLEEP | default "8"}}'
+    preconditions:
+      - sh: command -v jq >/dev/null
+        msg: 'jq is required (brew install jq)'
+    cmds:
+      - |
+        set -euo pipefail
+        CUSTOMER=$({{.STRIPE}} customers create -d email='{{.EMAIL}}' -d name='Test E.V.' | jq -r .id)
+        echo "customer = $CUSTOMER"
+        {{.STRIPE}} invoice_items create \
+          -d customer="$CUSTOMER" \
+          -d amount={{.AMOUNT}} \
+          -d currency={{.CURRENCY}} \
+          -d description='Bridge test line' > /dev/null
+        INVOICE=$({{.STRIPE}} invoices create -d customer="$CUSTOMER" -d collection_method=send_invoice -d days_until_due=30 | jq -r .id)
+        echo "invoice  = $INVOICE"
+        {{.STRIPE}} invoices finalize_invoice "$INVOICE" > /dev/null
+        {{.STRIPE}} invoices pay "$INVOICE" -d paid_out_of_band=true > /dev/null
+        echo "finalized + marked paid — sleeping {{.SLEEP}}s for NAV CREATE"
+        sleep {{.SLEEP}}
+        {{.STRIPE}} credit_notes create -d invoice="$INVOICE" -d amount={{.CREDIT_AMOUNT}} > /dev/null
+        echo "credit note created for {{.CREDIT_AMOUNT}} {{.CURRENCY}} against $INVOICE"
+
+  # --- Quality gates ---
+
+  test:
+    desc: Run unit tests
+    env:
+      STRIPE_WEBHOOK_SECRET: ""
+    cmds:
+      - '{{.GO}} test ./... -count=1'
+
+  test:race:
+    desc: Run unit tests with the race detector
+    cmds:
+      - '{{.GO}} test ./... -race -count=1'
+
+  test:cover:
+    desc: Run unit tests with coverage summary
+    cmds:
+      - '{{.GO}} test ./... -cover -count=1'
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - '{{.GO}} vet ./...'
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - '{{.GOLANGCI_LINT}} run'
+
+  tidy:
+    desc: Tidy go.mod
+    cmds:
+      - '{{.GO}} mod tidy'
+
+  generate:
+    desc: Generate reference NAV schema structs into nav/schemas/generated/ (requires xgen on PATH and XSDs in nav/schemas/xsd/ — see that directory's README)
+    preconditions:
+      - sh: 'ls nav/schemas/xsd/*.xsd >/dev/null 2>&1'
+        msg: 'No XSDs found under nav/schemas/xsd/. See nav/schemas/xsd/README.md for how to obtain them from the NAV portal.'
+      - sh: 'command -v xgen >/dev/null'
+        msg: 'xgen is required. Install with: go install github.com/xuri/xgen/cmd/xgen@latest'
+    cmds:
+      - 'mkdir -p nav/schemas/generated'
+      - 'xgen -i nav/schemas/xsd -o nav/schemas/generated -p generated -l Go'
+      - 'echo "Generated structs in nav/schemas/generated/. These are NOT used at runtime — diff against nav/schemas/*.go to spot drift."'
+
+  clean:
+    desc: Remove build/test artefacts
+    cmds:
+      - '{{.GO}} clean ./...'

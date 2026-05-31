@@ -1,0 +1,38 @@
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gosec
+    - ineffassign
+    - unused
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+      - name: var-naming
+      - name: error-return
+      - name: error-naming
+      - name: if-return
+      - name: error-strings
+  gosec:
+    excludes:
+      - G115 # int conversion (NAV amounts are bounded)
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+    - path: nav/schemas/
+      linters:
+        - revive
+        - staticcheck

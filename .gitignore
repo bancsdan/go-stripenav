@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+
+# Build / test artifacts
+*.test
+*.out
+coverage.out
+
+# Local IDE state
+.idea/
+.vscode/
+
+# Claude Code local config (personal allowlist, machine paths)
+.claude/
+
+# OpenSpec design artifacts (kept locally, regenerated via /opsx commands)
+openspec/
+
+# NAV spec PDFs and any other binary docs (auth-walled, not redistributed)
+*.pdf
