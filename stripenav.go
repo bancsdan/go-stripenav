@@ -57,6 +57,13 @@ type Config struct {
 	// tests where ticks would race with the test scenario.
 	DisableWorker bool
 
+	// WorkerTickInterval overrides how often the background worker
+	// scans the store for pending work. Defaults to 30s. Set to a few
+	// seconds during local development so submissions are processed
+	// without a long wait; leave at the default in production where
+	// snappiness matters less than respecting NAV's rate budget.
+	WorkerTickInterval time.Duration
+
 	// navClient is an injection seam for unit tests. Production callers
 	// never set this directly; the Handler constructor builds a real
 	// *nav.Client from the NAV config. Tests in this package can poke at
@@ -112,12 +119,13 @@ func Handler(cfg Config, opts ...Option) (*BridgeHandler, error) {
 	h := &BridgeHandler{cfg: cfg}
 	if !cfg.DisableWorker {
 		worker, err := NewWorker(WorkerConfig{
-			Store:   cfg.Store,
-			Client:  cfg.navClient,
-			Supplier: cfg.Supplier,
-			Logger:  cfg.Logger,
-			Metrics: cfg.Metrics,
-			Clock:   cfg.Clock,
+			Store:        cfg.Store,
+			Client:       cfg.navClient,
+			Supplier:     cfg.Supplier,
+			Logger:       cfg.Logger,
+			Metrics:      cfg.Metrics,
+			Clock:        cfg.Clock,
+			TickInterval: cfg.WorkerTickInterval,
 		})
 		if err != nil {
 			return nil, err
