@@ -58,4 +58,4 @@ generated structs mid-flight would risk losing that earned correctness
 to subtle differences in field ordering, naming, or namespace
 qualifications. A planned `v0.3` task: write the comparison harness,
 verify the generated structs match the hand-written ones byte-for-byte
-on the sample fixtures in `nav-api-sample/`, then swap.
+on the sample fixtures in `docs/nav-api-samples/`, then swap.
