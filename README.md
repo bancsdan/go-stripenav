@@ -3,47 +3,26 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/bancsdan/go-stripenav.svg)](https://pkg.go.dev/github.com/bancsdan/go-stripenav)
 [![CI](https://github.com/bancsdan/go-stripenav/actions/workflows/ci.yml/badge.svg)](https://github.com/bancsdan/go-stripenav/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/bancsdan/go-stripenav)](https://github.com/bancsdan/go-stripenav/releases)
-[![Container](https://img.shields.io/badge/ghcr.io-bancsdan%2Fgo--stripenav-blue?logo=docker)](https://github.com/bancsdan/go-stripenav/pkgs/container/go-stripenav)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Bridge Stripe webhook events to Hungary's NAV [Online Számla v3.0](https://onlineszamla.nav.gov.hu/) invoice reporting API.
+Go library that bridges Stripe webhook events to Hungary's NAV
+[Online Számla v3.0](https://onlineszamla.nav.gov.hu/) invoice reporting API.
 
-Stripe is the dominant billing platform for online merchants, but it does not natively report invoices to Hungary's tax authority. Hungarian VAT law requires invoices to be reported to NAV within **24 hours** of issuance (and within **4 hours** for invoices issued by automated systems, which Stripe is). This project fills that gap so a Stripe-native backend can comply without re-issuing every invoice through a third-party invoicing service like szamlazz.hu or Billingo.
+Embed it in your existing Go backend to satisfy NAV's mandatory invoice
+reporting (24 hours from issuance, 4 hours for automated systems) without
+re-issuing every Stripe invoice through a third-party invoicing service.
 
-> Status: `v0.x`. The public API is first-cut and may evolve before `v1.0.0`.
+**Don't write Go?** A ready-to-deploy container of the same logic lives at
+[bancsdan/stripenav](https://github.com/bancsdan/stripenav). Run the
+container, point your Stripe webhook at it, done.
 
-## Two ways to use it
-
-| If your backend is… | Use the |
-| --- | --- |
-| Go | **library** — import `github.com/bancsdan/go-stripenav`, mount the handler on your existing HTTP server. See [`docs/EMBED.md`](./docs/EMBED.md). |
-| Node, PHP, Python, .NET, Ruby, or anything else | **container** — run `ghcr.io/bancsdan/go-stripenav`, point Stripe's webhook at it. See [`docs/DEPLOY.md`](./docs/DEPLOY.md). |
-
-Both paths run the same code: the container is the library wrapped in a thin `cmd/gostripenav` binary.
-
-## What it does
-
-- Exposes an embeddable `http.Handler` (Go library) or a deployable HTTP service (container) that accepts Stripe webhook events on `/webhooks/stripe`.
-- Verifies the Stripe webhook signature.
-- Routes Stripe lifecycle events to the matching NAV `manageInvoice` operation:
-  - `invoice.finalized` → **CREATE**
-  - `invoice.voided` / `invoice.marked_uncollectible` → **STORNO**
-  - `credit_note.created` / `credit_note.voided` → **MODIFY**
-- Implements the full NAV v3.0 envelope: signed `tokenExchange`, `manageInvoice`, `manageAnnulment`, and `queryTransactionStatus`.
-- Persists each submission through a pluggable `SubmissionStore`. Ships with an in-memory reference store (dev only) and a production Postgres adapter in the container.
-- Runs a background worker that polls transaction status, retries transient failures with exponential backoff, respects parent-child ordering (STORNO waits for its CREATE to be accepted), and aborts submissions that miss the 24-hour deadline.
-- Out-of-band `(*BridgeHandler).AnnulInvoice` method for the rare "I sent NAV malformed data" case — never triggered by Stripe events, called manually from your admin tooling.
-
-## Container quickstart
+## Install
 
 ```bash
-docker run --rm -p 8080:8080 --env-file .env \
-  ghcr.io/bancsdan/go-stripenav:latest
+go get github.com/bancsdan/go-stripenav
 ```
 
-With `.env` populated per [`docs/DEPLOY.md`](./docs/DEPLOY.md). Then point your Stripe webhook at `https://your-host:8080/webhooks/stripe` and subscribe to `invoice.finalized`, `invoice.voided`, `invoice.marked_uncollectible`, `credit_note.created`, `credit_note.voided`.
-
-## Library quickstart
+## Quickstart
 
 ```go
 package main
@@ -62,14 +41,14 @@ func main() {
     h, err := stripenav.Handler(stripenav.Config{
         StripeWebhookSecret: "whsec_…",
         NAV: nav.Config{
-            BaseURL:     nav.TestBaseURL, // nav.ProductionBaseURL when you're ready
+            BaseURL:     nav.TestBaseURL, // or nav.ProductionBaseURL
             Login:       "…",
             Password:    "…",
-            TaxNumber:   "12345678",        // accepts hyphenated 12345678-9-01 too
+            TaxNumber:   "12345678",
             SignKey:     "…",
-            ExchangeKey: "0123456789ABCDEF", // exactly 16 chars
+            ExchangeKey: "0123456789ABCDEF",
             Software: nav.Software{
-                ID:             "HU00000000GOSTRPNV",
+                ID:             "HU12345678MYSHOP01",
                 Name:           "MyShop",
                 Operation:      "LOCAL_SOFTWARE",
                 MainVersion:    "1.0.0",
@@ -87,7 +66,7 @@ func main() {
                 City:        "Budapest",
             },
         },
-        Store: storeinmem.New(), // dev only — implement SubmissionStore against your DB for production
+        Store: storeinmem.New(), // dev only — implement SubmissionStore for production
     })
     if err != nil {
         log.Fatal(err)
@@ -97,39 +76,74 @@ func main() {
 }
 ```
 
-For production, implement `stripenav.SubmissionStore` against your database. See [`docs/EMBED.md`](./docs/EMBED.md) for the SubmissionStore contract, a Postgres sketch, and how to wire metrics, custom loggers, and out-of-band annulment.
+On the Stripe side, register a webhook endpoint at
+`https://your-host/webhooks/stripe` and subscribe to:
 
-## Configuration reference
+- `invoice.finalized`
+- `invoice.voided`
+- `invoice.marked_uncollectible`
+- `credit_note.created`
+- `credit_note.voided`
 
-| Field | Purpose |
+## What it does
+
+| | Mapped to |
 | --- | --- |
-| `StripeWebhookSecret` | Stripe endpoint signing secret (`whsec_…`). Required. |
-| `NAV` | NAV technical-user credentials and software identification. Required. |
-| `Supplier` | The supplier's NAV-registered identity. Required. |
-| `Store` | Pluggable submission persistence. Required. |
-| `ExchangeRateProvider` | Function returning the foreign→HUF rate for a given currency. Required if non-HUF invoices are expected; if nil, non-HUF invoices fail mapping. |
-| `Logger` | `*slog.Logger`. Defaults to `slog.Default()`. |
-| `Metrics` | `MetricsRecorder` for per-status counters and per-call latency. Optional. |
-| `Clock` | Time source override (useful in tests). Defaults to `time.Now`. |
-| `AcceptTimeout` | Max time the handler spends in mapping + persisting per webhook delivery. Defaults to 5s. |
-| `DisableWorker` | If true, do not start the background worker (e.g. when you run the worker in a separate process). Defaults to false. |
+| `invoice.finalized` | NAV `manageInvoice` operation `CREATE` |
+| `invoice.voided`, `invoice.marked_uncollectible` | NAV `manageInvoice` operation `STORNO` (mirror invoice with negative amounts referencing the original) |
+| `credit_note.created`, `credit_note.voided` | NAV `manageInvoice` operation `MODIFY` |
+| out-of-band admin call | NAV `manageAnnulment` via `(*BridgeHandler).AnnulInvoice` |
 
-Test plumbing is via the `WithNAVClient(c NAVClient)` functional option so the public Config struct stays focused on production fields.
+Implementation details:
 
-## Operational notes
+- **Signature verification** on every Stripe delivery using the documented
+  HMAC-SHA256 scheme.
+- **Idempotency** on `event.id` so Stripe re-deliveries don't produce
+  duplicate NAV submissions.
+- **NAV v3.0 envelope**: signed `tokenExchange`, `manageInvoice`,
+  `manageAnnulment`, `queryTransactionStatus`. Includes SHA-512 password
+  hash, SHA3-512 request signature, AES-128-ECB exchange-token
+  decryption with PKCS#7 unpadding.
+- **Persist-then-async**: the webhook handler verifies, persists, returns
+  200. A background worker polls the store, submits to NAV, polls
+  transaction status, and retries transient failures with exponential
+  backoff (`30s` base, `15m` cap, ±20% jitter).
+- **Parent dependency tracking**: a STORNO submission waits for its
+  parent CREATE to be `accepted` on NAV's side before submitting.
+- **24-hour deadline**: submissions that miss it transition to `aborted`
+  with an error-level log.
 
-### 24-hour SLA
+## Configuration
 
-The worker treats the 24-hour reporting deadline as a hard cap. Submissions whose `IssuedAt` is more than 24 hours in the past are moved to the `aborted` terminal state with an error-level log and a metric. Wire those logs into your oncall.
+```go
+type Config struct {
+    StripeWebhookSecret  string
+    NAV                  nav.Config
+    Supplier             mapping.Supplier
+    Store                SubmissionStore
+    ExchangeRateProvider func(ctx context.Context, currency string, at time.Time) (string, error)
+    Logger               *slog.Logger    // defaults to slog.Default()
+    Metrics              MetricsRecorder // optional
+    Clock                func() time.Time // defaults to time.Now
+    AcceptTimeout        time.Duration   // bounds the persist work; defaults to 5s
+    DisableWorker        bool
+    // unexported test injection seam — use stripenav.WithNAVClient(fake)
+}
+```
 
-### Persistence
+Test injection:
 
-The bundled `storeinmem.Store` loses state on process restart — unit tests and local dev only. In production:
+```go
+h, err := stripenav.Handler(cfg, stripenav.WithNAVClient(fakeClient))
+```
 
-- **Embed the library**: implement `stripenav.SubmissionStore` against your database (see [`docs/EMBED.md`](./docs/EMBED.md)).
-- **Run the container**: set `STORE_URL=postgres://...` to use the built-in Postgres adapter; the container ships migrations and runs them on boot.
+## Persistence
 
-The interface:
+The bundled `storeinmem.Store` is a sync.Mutex-protected map. **State is
+lost on restart** — fine for unit tests and local dev, not for production.
+
+For production, implement `stripenav.SubmissionStore` against your
+durable storage:
 
 ```go
 type SubmissionStore interface {
@@ -141,83 +155,68 @@ type SubmissionStore interface {
 }
 ```
 
-`UpdateStatus` must be atomic. The Postgres adapter implements it as a `SELECT … FOR UPDATE` inside a transaction.
+`UpdateStatus` must be atomic — the simplest implementation uses
+`SELECT … FOR UPDATE` inside a transaction.
 
-### Retries and backoff
+A working Postgres adapter (with embedded migration, atomic updates,
+multi-worker concurrency tests) lives in the
+[stripenav service repo](https://github.com/bancsdan/stripenav/tree/main/internal/storepg).
+Copy or vendor it if you want the same shape.
 
-The worker retries transient NAV failures with exponential backoff (`base=30s`, `cap=15m`, ±20% jitter). Non-retriable NAV errors (e.g. `INVALID_USER_RIGHT`, `INVALID_REQUEST`) cause the submission to move to `rejected` without retry. Parent dependencies are enforced: a STORNO submission waits until its CREATE has been accepted by NAV before going on the wire.
-
-### Environment selection
-
-NAV has separate production and test endpoints. The client refuses to default — you must pass `nav.ProductionBaseURL` or `nav.TestBaseURL` explicitly so a misconfigured deployment never accidentally hits production.
-
-## What this package does NOT do
-
-- **Inbound (purchase) invoice reporting** via `INBOUND` query operations.
-- **Periodic taxpayer queries** (`queryTaxpayer`) to validate counterparties.
-- **PDF or e-invoice generation.** Stripe issues the invoice; this package only reports it.
-- **Tax determination.** Stripe-computed line VAT is reformatted, not recomputed. If your Stripe Tax setup is wrong, NAV will reject the submission.
-- **Schemas other than NAV Online Számla v3.0.** EU PEPPOL / UBL / FatturaPA are out of scope.
-- **Hosted SaaS.** You run the binary (or import the library); the project is not a managed service.
-
-## Repository layout
+## Package layout
 
 ```
 github.com/bancsdan/go-stripenav
 ├── stripenav.go            // Handler + Config + Shutdown + AnnulInvoice
 ├── submission.go           // Submission, SubmissionStore, state machine
-├── worker.go               // background worker, retries, deadline, parent ordering
-├── credit_note.go          // CreditNote → MODIFY synthesis; STORNO line negation
+├── worker.go               // background worker, retries, deadline, parent deps
+├── credit_note.go          // invoice → storno + credit-note synthesis
 ├── mapping/                // Stripe → NAV translation (pure, no I/O)
 │   ├── mapping.go
-│   ├── tax.go
-│   ├── currency.go
+│   ├── tax.go              // Hungarian VAT-number splitting, customer category
+│   ├── currency.go         // big.Rat amounts, HUF summary
 │   └── errors.go
 ├── nav/                    // NAV API client
-│   ├── client.go
-│   ├── envelope.go
-│   ├── sign.go
-│   ├── token.go
-│   ├── requests.go
-│   ├── errors.go
-│   └── schemas/            // OSA/3.0/data, OSA/3.0/api, NTCA/1.0/common types
-├── storeinmem/             // reference SubmissionStore (dev only)
-├── cmd/                    // nested module — binaries, not part of the library
-│   ├── gostripenav/        // the canonical service, what the container runs
-│   └── nav-status/         // operator CLI for queryTransactionStatus
-├── docs/
-│   ├── DEPLOY.md           // container deployment guide
-│   ├── EMBED.md            // library embedding guide
-│   └── nav-api-samples/    // NAV-published reference XMLs
-├── Dockerfile              // multi-stage build, distroless, ~9 MB final
-└── Taskfile.yml            // dev workflows: task dev, task nav:status, etc.
+│   ├── client.go           // tokenExchange, manageInvoice, manageAnnulment, queryTransactionStatus
+│   ├── envelope.go         // common:header, common:user, software
+│   ├── sign.go             // SHA-512 password hash, SHA3-512 request signature
+│   ├── token.go            // AES-128-ECB + PKCS#7
+│   ├── requests.go         // per-endpoint request envelopes
+│   ├── errors.go           // *NAVError with retriability
+│   └── schemas/            // hand-written OSA/3.0/data, OSA/3.0/api, etc.
+├── storeinmem/             // reference SubmissionStore for tests + dev
+└── docs/
+    └── nav-api-samples/    // NAV-published sample requests for reference
 ```
 
-Library users (`go get`) pull only the root packages — `cmd/`, `Dockerfile`, `docs/`, and the GitHub Actions workflows live in nested modules or non-Go directories that the module proxy doesn't include.
+## What this package does NOT do
 
-## Local development
-
-```bash
-# One-time setup
-brew install go-task stripe/stripe-cli/stripe jq
-stripe login
-task stripe:secret >> .env   # paste into STRIPE_WEBHOOK_SECRET
-
-# Three terminals
-task stripe:listen           # Stripe CLI forwards events to localhost:8080
-task dev                     # the bridge, same code as the container
-task stripe:trigger EVENT=invoice.finalized   # fire test events
-
-# Inspect a NAV transaction
-task nav:status TX=<transactionId>
-```
-
-See `task --list` for the full task surface.
+- **Inbound (purchase) invoice reporting** via `INBOUND` query operations.
+- **Periodic taxpayer queries** (`queryTaxpayer`) to validate counterparties.
+- **PDF or e-invoice generation.** Stripe issues the invoice; this package
+  only reports it.
+- **Tax determination.** Stripe-computed line VAT is reformatted, not
+  recomputed. If your Stripe Tax setup is wrong, NAV will reject the
+  submission.
+- **Schemas other than NAV Online Számla v3.0.** EU PEPPOL / UBL /
+  FatturaPA are out of scope.
+- **Shipping a production-grade `SubmissionStore`.** The
+  [stripenav service repo](https://github.com/bancsdan/stripenav)
+  packages a Postgres adapter that's ready to use.
 
 ## Testing against NAV's test environment
 
-The package ships unit tests covering signing, mapping, lifecycle, and handler behaviour. End-to-end testing against `api-test.onlineszamla.nav.gov.hu` requires a NAV technical user — register one at the [test portal](https://onlineszamla-test.nav.gov.hu/), set the `NAV_*` env vars in `.env`, and run `task dev` plus `task stripe:trigger`.
+Unit tests cover signing, mapping, lifecycle, and handler behaviour
+(`go test ./... -race`). End-to-end tests against
+`api-test.onlineszamla.nav.gov.hu` are not part of the default run —
+register a test technical user on the NAV portal, set `nav.Config`
+appropriately, and replay a captured Stripe event through the handler.
+
+The [stripenav service repo](https://github.com/bancsdan/stripenav)
+ships task targets (`task stripe:scenario:void`,
+`task stripe:trigger EVENT=invoice.finalized`) that drive this
+end-to-end against the local container + the Stripe CLI.
 
 ## License
 
-MIT — see [`LICENSE`](./LICENSE).
+MIT — see [LICENSE](LICENSE).
