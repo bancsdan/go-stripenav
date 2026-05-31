@@ -19,3 +19,6 @@ openspec/
 
 # NAV spec PDFs and any other binary docs (auth-walled, not redistributed)
 *.pdf
+
+# Go workspace lock file — generated, not part of source
+go.work.sum
