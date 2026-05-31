@@ -123,6 +123,27 @@ tasks:
     cmds:
       - '{{.DOCKER}} run --rm -p 8080:8080 --env-file .env {{.IMAGE}}:{{.TAG}}'
 
+  # ── Postgres integration tests ──────────────────────────────────
+
+  pg:up:
+    desc: Start a throwaway Postgres for storepg integration tests (port 25432)
+    cmds:
+      - '{{.DOCKER}} run -d --rm --name stripenav-pgtest -e POSTGRES_PASSWORD=test -p 25432:5432 postgres:16-alpine'
+      - 'echo "waiting for postgres…" && for i in $(seq 1 30); do {{.DOCKER}} exec stripenav-pgtest pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done'
+      - 'echo "PG_TEST_DSN=postgres://postgres:test@localhost:25432/postgres?sslmode=disable"'
+
+  pg:down:
+    desc: Stop the throwaway Postgres
+    cmds:
+      - '{{.DOCKER}} stop stripenav-pgtest || true'
+
+  test:pg:
+    desc: Run the Postgres storepg integration tests (requires task pg:up first or an external PG_TEST_DSN)
+    env:
+      PG_TEST_DSN: '{{.PG_TEST_DSN | default "postgres://postgres:test@localhost:25432/postgres?sslmode=disable"}}'
+    cmds:
+      - 'cd cmd && {{.GO}} test -race -count=1 ./internal/storepg/...'
+
   # ── Quality gates ────────────────────────────────────────────────
 
   test:

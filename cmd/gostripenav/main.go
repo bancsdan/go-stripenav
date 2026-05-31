@@ -33,6 +33,7 @@ import (
 	"time"
 
 	stripenav "github.com/bancsdan/go-stripenav"
+	"github.com/bancsdan/go-stripenav/cmd/internal/storefactory"
 	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/storeinmem"
@@ -41,8 +42,28 @@ import (
 const shutdownGrace = 30 * time.Second
 
 func main() {
+	// --healthcheck: self-invoke via Docker HEALTHCHECK. The distroless
+	// image has no shell or curl, so we use the binary itself: it hits
+	// /healthz on the configured listen address and exits 0/1.
+	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
+		os.Exit(runHealthcheck())
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	storeCtx, storeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	store, storeClose, err := storefactory.From(storeCtx, os.Getenv("STORE_URL"))
+	storeCancel()
+	if err != nil {
+		logger.Error("store init", "err", err)
+		os.Exit(1)
+	}
+	defer storeClose()
+
+	if _, inMem := store.(*storeinmem.Store); inMem {
+		logger.Warn("using in-memory submission store — data lost on restart; set STORE_URL=postgres://... for production")
+	}
 
 	cfg := stripenav.Config{
 		StripeWebhookSecret: mustEnv("STRIPE_WEBHOOK_SECRET"),
@@ -74,12 +95,8 @@ func main() {
 				AdditionalDetail: getenv("SUPPLIER_ADDRESS", ""),
 			},
 		},
-		Store:                storeinmem.New(),
+		Store:                store,
 		ExchangeRateProvider: devRateProvider,
-	}
-
-	if cfg.Store == nil || isInMemoryStore(cfg.Store) {
-		logger.Warn("using in-memory submission store — data lost on restart; wire a real SubmissionStore for production")
 	}
 
 	h, err := stripenav.Handler(cfg)
@@ -137,11 +154,6 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-func isInMemoryStore(s stripenav.SubmissionStore) bool {
-	_, ok := s.(*storeinmem.Store)
-	return ok
-}
-
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
@@ -156,6 +168,32 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// runHealthcheck implements the `--healthcheck` self-check used by
+// Docker HEALTHCHECK. Resolves LISTEN_ADDR the same way the server
+// does, calls GET /healthz, and returns 0 on success / 1 on failure.
+func runHealthcheck() int {
+	addr := getenv("LISTEN_ADDR", ":8080")
+	host := "localhost"
+	if strings.HasPrefix(addr, ":") {
+		// already host-less, prepend localhost
+		addr = host + addr
+	}
+	url := "http://" + addr + "/healthz"
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		fmt.Fprintf(os.Stderr, "healthcheck: status %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
 }
 
 // devRateProvider is a dev-time stub: fixed approximate rates so that

@@ -29,3 +29,30 @@ jobs:
       - name: Build cmd binaries
         working-directory: cmd
         run: go build ./...
+
+  test-pg:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test storepg adapter
+        working-directory: cmd
+        env:
+          PG_TEST_DSN: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+        run: go test -race -count=1 ./internal/storepg/...

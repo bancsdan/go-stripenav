@@ -30,6 +30,7 @@ plain Docker on a VM, k8s.
 | `SUPPLIER_CITY` | yes | |
 | `SUPPLIER_ADDRESS` | no | Street + number etc. |
 | `LISTEN_ADDR` | no | Defaults to `:8080`. |
+| `STORE_URL` | no | Submission store URL — see [Persistence](#persistence). Unset / `memory:` → in-memory (dev only). `postgres://...` → Postgres adapter, migrations run on boot. |
 
 ## Endpoints
 
@@ -110,40 +111,104 @@ spec:
               memory: 256Mi
 ```
 
-## Persistence — IMPORTANT
+## Persistence
 
-The default build uses the in-memory submission store. **State is lost on
-restart**, which means:
+The container ships with two `SubmissionStore` implementations selected
+by `STORE_URL`:
+
+| `STORE_URL` value | Adapter | When to use |
+| --- | --- | --- |
+| unset, or `memory:` | in-memory | Local dev, smoke tests. State lost on restart. |
+| `postgres://user:pw@host:port/db?sslmode=…` | Postgres | Production. |
+| `postgresql://…` | Postgres (same) | Production. |
+| `mysql://…` | not built in | Returns startup error. Embed the library to provide your own. |
+| `dynamodb://…` | not built in | Returns startup error. Embed the library to provide your own. |
+
+### In-memory (default) — IMPORTANT
+
+State is lost on restart. That means:
 
 - A pod restart between a CREATE going to NAV and the worker polling its
   status loses the transaction id; the submission is never marked
   `accepted`.
 - Retries of failed submissions don't survive restart.
-- The bridge's idempotency check (event id → existing submission) breaks
-  across restarts; you'll get duplicate NAV submissions on Stripe
-  re-deliveries.
+- The bridge's event-id deduplication breaks across restarts; you'll get
+  duplicate NAV submissions on Stripe re-deliveries.
 
-For any production deployment you must implement `stripenav.SubmissionStore`
-against your durable storage (Postgres, MySQL, DynamoDB, etc.) and run
-your own binary that wires it in. See [`EMBED.md`](./EMBED.md) for how to
-do that.
+OK for: local dev, staging against the NAV test env, low-volume
+production where occasional restart-loss is acceptable.
 
-The bundled container is suitable for: local dev, staging against the
-NAV test env, low-volume production where occasional restart-loss is
-acceptable.
+### Postgres
+
+Set `STORE_URL` to a libpq connection string:
+
+```
+STORE_URL=postgres://stripenav:secret@db.internal:5432/stripenav?sslmode=require
+```
+
+On boot the binary:
+
+1. Opens a connection pool (max 10 conns, 1 hr lifetime).
+2. Applies the embedded migration `001_init.sql` — creates the
+   `stripenav_submissions` table and its two indexes (`invoice_number`
+   for parent lookup, partial index on `next_attempt_at` for the worker
+   tick). The migration is idempotent.
+3. Serves requests.
+
+Granted to the user in the DSN should be at least: `INSERT`, `SELECT`,
+`UPDATE` on `stripenav_submissions`, and `CREATE TABLE`, `CREATE INDEX`
+the first time so the migration succeeds.
+
+For local development with docker-compose:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: stripenav
+      POSTGRES_PASSWORD: stripenavpw
+      POSTGRES_DB: stripenav
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  gostripenav:
+    image: ghcr.io/bancsdan/go-stripenav:latest
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      STORE_URL: postgres://stripenav:stripenavpw@postgres:5432/stripenav?sslmode=disable
+    restart: unless-stopped
+
+volumes:
+  pgdata: {}
+```
 
 ## Scaling
 
-Until a real `SubmissionStore` is wired in, run **exactly one replica.**
-Two pods sharing nothing means two independent stores and two
-independent workers — they'll race on submissions, the second pod's
-worker can't see the first's submitted records, and you'll get
-duplicates and orphans.
+With the in-memory store, run **exactly one replica.** Two pods sharing
+nothing means two independent stores and two independent workers —
+they'll race on submissions, the second pod's worker can't see the
+first's submitted records, and you'll get duplicates and orphans.
 
-With a shared durable store, multiple replicas are safe (the store's
-`UpdateStatus` is atomic by interface contract). Implement
-`FindByInvoiceNumber` and `ListPending` to be cluster-aware (e.g.,
-`SELECT … FOR UPDATE SKIP LOCKED`) before you scale.
+With the Postgres store: `UpdateStatus` is atomic (it uses
+`SELECT … FOR UPDATE`), so multi-pod is *safe* for state updates. The
+remaining caveat is `ListPending`: it does not yet use
+`SELECT … FOR UPDATE SKIP LOCKED` to claim rows, so two workers reading
+the table at the same instant may both attempt to submit the same
+record. Each `attemptSubmit` round trip is fronted by the
+`UpdateStatus` lock, so the *second* worker will see the row already
+in `submitted` state and skip it — but NAV may still receive duplicate
+`manageInvoice` calls in a tight race.
+
+Until claim-with-skip-locked lands, run **one worker replica** (set
+`Config.DisableWorker = true` on additional pods if you embed the
+library, or simply run one container).
 
 ## Observability
 
