@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet root module
+        run: go vet ./...
+
+      - name: Test root module
+        run: go test ./... -race -count=1
+
+      - name: Vet cmd module
+        working-directory: cmd
+        run: go vet ./...
+
+      - name: Build cmd binaries
+        working-directory: cmd
+        run: go build ./...

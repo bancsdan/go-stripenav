@@ -1,0 +1,30 @@
+# Source-tree noise that the Docker build doesn't need
+.git
+.github
+.idea
+.vscode
+.claude
+openspec
+docs
+
+# Markdown lives at repo root and in subpackages; only README-in-cmd is
+# useful inside the image (currently none, but reserved).
+*.md
+!cmd/**/*.md
+
+# License + changelog ship with the source distribution, not the image.
+LICENSE
+CHANGELOG.md
+
+# Local secrets — must never bake into images.
+.env
+.env.*
+
+# Pre-built artifacts.
+*.test
+*.out
+coverage.out
+
+# Generated reference structs (not part of runtime build).
+nav/schemas/generated
+nav/schemas/xsd

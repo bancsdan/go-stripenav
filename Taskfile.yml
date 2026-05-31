@@ -6,36 +6,21 @@ vars:
   GO: '{{.GO | default "go"}}'
   GOLANGCI_LINT: '{{.GOLANGCI_LINT | default "golangci-lint"}}'
   STRIPE: '{{.STRIPE | default "stripe"}}'
+  DOCKER: '{{.DOCKER | default "docker"}}'
   LISTEN_ADDR: '{{.LISTEN_ADDR | default ":8080"}}'
+  IMAGE: '{{.IMAGE | default "ghcr.io/bancsdan/go-stripenav"}}'
 
 tasks:
   default:
-    desc: Run vet and tests (the standard pre-commit check)
+    desc: Pre-commit check — vet + tests across both modules
     deps: [vet, test]
 
-  # --- Local end-to-end dev flow ---
+  # ── Local end-to-end dev flow ─────────────────────────────────────
 
   dev:
-    desc: Run the example server with .env loaded (terminal B in the e2e flow)
+    desc: Run the bridge locally (env vars from .env). Same code as the container image.
     cmds:
-      - '{{.GO}} run ./examples/nethttp-server'
-
-  stripe:secret:
-    desc: Print the persistent Stripe CLI webhook signing secret — paste into STRIPE_WEBHOOK_SECRET in .env (one-time per account)
-    cmds:
-      - '{{.STRIPE}} listen --print-secret'
-
-  stripe:listen:
-    desc: Forward live Stripe webhook events to the local server (terminal A)
-    cmds:
-      - '{{.STRIPE}} listen --forward-to localhost{{.LISTEN_ADDR}}/webhooks/stripe'
-
-  stripe:trigger:
-    desc: Fire a synthetic invoice.finalized event (terminal C). Override with EVENT=...
-    vars:
-      EVENT: '{{.EVENT | default "invoice.finalized"}}'
-    cmds:
-      - '{{.STRIPE}} trigger {{.EVENT}}'
+      - '{{.GO}} run ./cmd/gostripenav'
 
   nav:status:
     desc: 'Query NAV /queryTransactionStatus for a transaction id. Usage: task nav:status TX=5EE7G1KH050R7P6K'
@@ -45,10 +30,27 @@ tasks:
       - sh: 'test -n "{{.TX}}"'
         msg: 'TX is required. Usage: task nav:status TX=<transactionId>'
     cmds:
-      - '{{.GO}} run ./examples/nav-status {{.TX}}'
+      - '{{.GO}} run ./cmd/nav-status {{.TX}}'
+
+  stripe:secret:
+    desc: Print the persistent Stripe CLI webhook signing secret — paste into STRIPE_WEBHOOK_SECRET in .env (one-time per account)
+    cmds:
+      - '{{.STRIPE}} listen --print-secret'
+
+  stripe:listen:
+    desc: Forward live Stripe webhook events to the local server
+    cmds:
+      - '{{.STRIPE}} listen --forward-to localhost{{.LISTEN_ADDR}}/webhooks/stripe'
+
+  stripe:trigger:
+    desc: Fire a synthetic Stripe event. Override with EVENT=...
+    vars:
+      EVENT: '{{.EVENT | default "invoice.finalized"}}'
+    cmds:
+      - '{{.STRIPE}} trigger {{.EVENT}}'
 
   stripe:scenario:void:
-    desc: Create + finalize + void one real invoice end-to-end (so NAV sees CREATE then a void for the same number)
+    desc: Create + finalize + void one real invoice end-to-end (so NAV sees CREATE then a STORNO for the same number)
     vars:
       EMAIL: '{{.EMAIL | default "ev-test@example.com"}}'
       AMOUNT: '{{.AMOUNT | default "5000"}}'
@@ -73,7 +75,7 @@ tasks:
         echo "finalized — sleeping {{.SLEEP}}s so the bridge can CREATE on NAV"
         sleep {{.SLEEP}}
         {{.STRIPE}} invoices void_invoice "$INVOICE" > /dev/null
-        echo "voided $INVOICE — bridge should now hit /manageAnnulment for the same number"
+        echo "voided $INVOICE — bridge should now submit STORNO for the same number"
 
   stripe:scenario:creditnote:
     desc: Create + finalize + pay + issue a (partial) credit note for one real invoice
@@ -105,10 +107,26 @@ tasks:
         {{.STRIPE}} credit_notes create -d invoice="$INVOICE" -d amount={{.CREDIT_AMOUNT}} > /dev/null
         echo "credit note created for {{.CREDIT_AMOUNT}} {{.CURRENCY}} against $INVOICE"
 
-  # --- Quality gates ---
+  # ── Container build / run ────────────────────────────────────────
+
+  docker:build:
+    desc: Build the gostripenav container image locally
+    vars:
+      TAG: '{{.TAG | default "dev"}}'
+    cmds:
+      - '{{.DOCKER}} build -t {{.IMAGE}}:{{.TAG}} .'
+
+  docker:run:
+    desc: Run the locally-built container with the host .env passed through
+    vars:
+      TAG: '{{.TAG | default "dev"}}'
+    cmds:
+      - '{{.DOCKER}} run --rm -p 8080:8080 --env-file .env {{.IMAGE}}:{{.TAG}}'
+
+  # ── Quality gates ────────────────────────────────────────────────
 
   test:
-    desc: Run unit tests
+    desc: Run unit tests (root library module)
     env:
       STRIPE_WEBHOOK_SECRET: ""
     cmds:
@@ -125,19 +143,22 @@ tasks:
       - '{{.GO}} test ./... -cover -count=1'
 
   vet:
-    desc: Run go vet
+    desc: Run go vet across both modules
     cmds:
       - '{{.GO}} vet ./...'
+      - 'cd cmd && {{.GO}} vet ./...'
 
   lint:
-    desc: Run golangci-lint
+    desc: Run golangci-lint across both modules
     cmds:
       - '{{.GOLANGCI_LINT}} run'
+      - 'cd cmd && {{.GOLANGCI_LINT}} run'
 
   tidy:
-    desc: Tidy go.mod
+    desc: Tidy both modules
     cmds:
       - '{{.GO}} mod tidy'
+      - 'cd cmd && {{.GO}} mod tidy'
 
   generate:
     desc: Generate reference NAV schema structs into nav/schemas/generated/ (requires xgen on PATH and XSDs in nav/schemas/xsd/ — see that directory's README)
@@ -155,3 +176,4 @@ tasks:
     desc: Remove build/test artefacts
     cmds:
       - '{{.GO}} clean ./...'
+      - 'cd cmd && {{.GO}} clean ./...'

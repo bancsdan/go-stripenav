@@ -1,25 +1,28 @@
-// Minimal example server wiring the stripenav handler into net/http.
+// gostripenav is the canonical bridge binary: a small HTTP server that
+// receives Stripe webhook events on /webhooks/stripe and reports the
+// corresponding invoices to NAV's Online Számla v3.0 API.
+//
+// It's the same code that ships as the ghcr.io/bancsdan/go-stripenav
+// Docker image. For embedding the bridge inside an existing server,
+// see docs/EMBED.md and the library's godoc.
 //
 // Stripe-side setup:
 //  1. Create a webhook endpoint pointed at https://your-host/webhooks/stripe
-//  2. Subscribe at least to: invoice.finalized, invoice.voided,
+//  2. Subscribe to: invoice.finalized, invoice.voided,
 //     invoice.marked_uncollectible, credit_note.created, credit_note.voided
-//  3. Copy the endpoint signing secret (whsec_…) into STRIPE_WEBHOOK_SECRET.
+//  3. Put the endpoint signing secret (whsec_…) in STRIPE_WEBHOOK_SECRET.
 //
 // NAV-side setup:
-//  1. Provision a "technical user" (műszaki felhasználó) on the NAV
-//     Online Számla portal.
-//  2. Copy the login, password, taxNumber, signKey, and exchangeKey into
-//     the matching NAV_* env vars below.
-//  3. Set NAV_BASE_URL to either of the URLs exported as
-//     nav.ProductionBaseURL or nav.TestBaseURL.
+//  1. Provision a "technical user" (műszaki felhasználó) on the NAV portal.
+//  2. Set NAV_LOGIN, NAV_PASSWORD, NAV_TAX_NUMBER, NAV_SIGN_KEY, NAV_EXCHANGE_KEY.
+//  3. Set NAV_BASE_URL to either nav.TestBaseURL or nav.ProductionBaseURL.
 //
-// This example uses the bundled InMemoryStore, which is not durable. For
-// production wire your own SubmissionStore against your database.
+// Required env: see docs/DEPLOY.md.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -34,6 +37,8 @@ import (
 	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/storeinmem"
 )
+
+const shutdownGrace = 30 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -50,27 +55,31 @@ func main() {
 			ExchangeKey: mustEnv("NAV_EXCHANGE_KEY"),
 			Debug:       os.Getenv("NAV_DEBUG") == "true",
 			Software: nav.Software{
-				ID:             getenv("NAV_SOFTWARE_ID", "GOSTRIPENAV000001"),
-				Name:           "go-stripenav example",
-				Operation:      "LOCAL_SOFTWARE",
-				MainVersion:    "0.1.0",
-				DevName:        getenv("NAV_DEV_NAME", "example"),
-				DevContact:     getenv("NAV_DEV_CONTACT", "noreply@example.com"),
-				DevCountryCode: "HU",
+				ID:             getenv("NAV_SOFTWARE_ID", "HU00000000GOSTRPNV"),
+				Name:           getenv("NAV_SOFTWARE_NAME", "gostripenav"),
+				Operation:      getenv("NAV_SOFTWARE_OPERATION", "LOCAL_SOFTWARE"),
+				MainVersion:    getenv("NAV_SOFTWARE_VERSION", "0.1.0"),
+				DevName:        getenv("NAV_DEV_NAME", "gostripenav"),
+				DevContact:     getenv("NAV_DEV_CONTACT", "ops@example.com"),
+				DevCountryCode: getenv("NAV_DEV_COUNTRY", "HU"),
 			},
 		},
 		Supplier: mapping.Supplier{
 			TaxNumber: mustEnv("SUPPLIER_TAX_NUMBER"),
 			Name:      mustEnv("SUPPLIER_NAME"),
 			Address: mapping.Address{
-				CountryCode: getenv("SUPPLIER_COUNTRY", "HU"),
-				PostalCode:  mustEnv("SUPPLIER_POSTAL_CODE"),
-				City:        mustEnv("SUPPLIER_CITY"),
+				CountryCode:      getenv("SUPPLIER_COUNTRY", "HU"),
+				PostalCode:       mustEnv("SUPPLIER_POSTAL_CODE"),
+				City:             mustEnv("SUPPLIER_CITY"),
 				AdditionalDetail: getenv("SUPPLIER_ADDRESS", ""),
 			},
 		},
 		Store:                storeinmem.New(),
 		ExchangeRateProvider: devRateProvider,
+	}
+
+	if cfg.Store == nil || isInMemoryStore(cfg.Store) {
+		logger.Warn("using in-memory submission store — data lost on restart; wire a real SubmissionStore for production")
 	}
 
 	h, err := stripenav.Handler(cfg)
@@ -84,23 +93,40 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	addr := getenv("LISTEN_ADDR", ":8080")
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("listen", "err", err)
-			os.Exit(1)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
 		}
 	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	logger.Info("shutting down")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	select {
+	case sig := <-sigCh:
+		logger.Info("shutdown signal received", "signal", sig.String())
+	case err := <-errCh:
+		logger.Error("listen", "err", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("server shutdown", "err", err)
@@ -108,6 +134,12 @@ func main() {
 	if err := h.Shutdown(ctx); err != nil {
 		logger.Error("handler shutdown", "err", err)
 	}
+	logger.Info("shutdown complete")
+}
+
+func isInMemoryStore(s stripenav.SubmissionStore) bool {
+	_, ok := s.(*storeinmem.Store)
+	return ok
 }
 
 func mustEnv(key string) string {

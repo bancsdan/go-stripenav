@@ -1,12 +1,13 @@
-// Small CLI that queries NAV /queryTransactionStatus for a given
-// transactionId and prints a readable summary plus the raw XML.
+// nav-status is an operator's hand tool: it calls NAV's
+// /queryTransactionStatus for a given transactionId and prints a
+// readable summary plus (optionally) the raw XML response.
 //
 // Usage:
 //
-//	go run ./examples/nav-status <transactionId>
+//	go run ./cmd/nav-status <transactionId>
 //
-// Reads the same NAV_* env vars as examples/nethttp-server, so the
-// task target `task nav:status TX=...` loads .env automatically.
+// Reads the same NAV_* env vars as cmd/gostripenav, so `task nav:status
+// TX=...` picks up the local .env automatically.
 package main
 
 import (
@@ -34,11 +35,11 @@ func main() {
 		ExchangeKey: must("NAV_EXCHANGE_KEY"),
 		Software: nav.Software{
 			ID:             getenv("NAV_SOFTWARE_ID", "HU00000000GOSTRPNV"),
-			Name:           "go-stripenav status query",
+			Name:           "gostripenav status query",
 			Operation:      "LOCAL_SOFTWARE",
 			MainVersion:    "0.1.0",
-			DevName:        getenv("NAV_DEV_NAME", "example"),
-			DevContact:     getenv("NAV_DEV_CONTACT", "noreply@example.com"),
+			DevName:        getenv("NAV_DEV_NAME", "gostripenav"),
+			DevContact:     getenv("NAV_DEV_CONTACT", "ops@example.com"),
 			DevCountryCode: "HU",
 		},
 		Debug: os.Getenv("NAV_DEBUG") == "true",
