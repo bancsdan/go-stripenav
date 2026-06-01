@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -463,8 +465,13 @@ func (w *Worker) pollStatus(ctx context.Context, sub Submission) {
 	overall := overallStatus(resp)
 	switch overall {
 	case "ABORTED":
+		detail := formatValidationMessages(resp)
 		_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
-			s.LastError = "NAV reported ABORTED"
+			if detail != "" {
+				s.LastError = "NAV reported ABORTED: " + detail
+			} else {
+				s.LastError = "NAV reported ABORTED"
+			}
 			return s.Transition(StatusRejected)
 		})
 		w.metrics.RecordSubmissionResult(string(StatusRejected))
@@ -481,6 +488,33 @@ func (w *Worker) pollStatus(ctx context.Context, sub Submission) {
 			return s.Transition(StatusProcessing)
 		})
 	}
+}
+
+// formatValidationMessages collapses NAV's per-line technical and
+// business validation messages into a single human-readable string for
+// the LastError field. Only ERROR/CRITICAL severities are included —
+// WARN/INFO would be noise on a rejection.
+func formatValidationMessages(resp schemas.QueryTransactionStatusResponse) string {
+	var parts []string
+	for _, pr := range resp.ProcessingResults.ProcessingResult {
+		for _, m := range pr.TechnicalValidationMessages {
+			if m.ValidationResultCode == "ERROR" || m.ValidationResultCode == "CRITICAL" {
+				parts = append(parts, fmt.Sprintf("[tech idx=%d %s] %s: %s",
+					pr.Index, m.ValidationResultCode, m.ValidationErrorCode, m.Message))
+			}
+		}
+		for _, m := range pr.BusinessValidationMessages {
+			if m.ValidationResultCode == "ERROR" || m.ValidationResultCode == "CRITICAL" {
+				tag := ""
+				if m.Pointer != nil && m.Pointer.Tag != "" {
+					tag = " tag=" + m.Pointer.Tag
+				}
+				parts = append(parts, fmt.Sprintf("[biz idx=%d %s%s] %s: %s",
+					pr.Index, m.ValidationResultCode, tag, m.ValidationErrorCode, m.Message))
+			}
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func overallStatus(resp schemas.QueryTransactionStatusResponse) string {
