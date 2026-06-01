@@ -35,6 +35,14 @@ func (f *fakeNAVClient) AnnulInvoice(ctx context.Context, ops []nav.AnnulmentOpe
 
 func (f *fakeNAVClient) QueryTransactionStatus(ctx context.Context, tx string, returnOriginal bool) (schemas.QueryTransactionStatusResponse, error) {
 	atomic.AddInt32(&f.statusCalls, 1)
+	if f.statusFn == nil {
+		// Default: report FINISHED so lifecycle drives to accepted.
+		return schemas.QueryTransactionStatusResponse{
+			ProcessingResults: schemas.ProcessingResults{
+				ProcessingResult: []schemas.ProcessingResult{{Index: 1, InvoiceStatus: "FINISHED"}},
+			},
+		}, nil
+	}
 	return f.statusFn(ctx, tx, returnOriginal)
 }
 
@@ -49,7 +57,9 @@ func newTestWorker(t *testing.T, client stripenav.NAVClient, clock func() time.T
 		Store:        store,
 		Client:       client,
 		Clock:        clock,
-		TickInterval: time.Second,
+		ClaimerID:    "test",
+		MaxSleep:     time.Second,
+		PollInterval: 20 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)
@@ -57,15 +67,18 @@ func newTestWorker(t *testing.T, client stripenav.NAVClient, clock func() time.T
 	return w, store
 }
 
+// TestWorker_HappyPath: lifecycle goroutine drives a row from pending
+// through submit, poll (PROCESSING), poll (FINISHED), to accepted —
+// all inside one Tick because each step's wait is ≤ pollInterval.
 func TestWorker_HappyPath(t *testing.T) {
-	now := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
-	tickCount := int32(0)
+	now := time.Now().UTC()
+	pollCount := int32(0)
 	client := &fakeNAVClient{
 		submitFn: func(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
 			return nav.SubmitResult{TransactionID: "T1"}, nil
 		},
 		statusFn: func(ctx context.Context, tx string, _ bool) (schemas.QueryTransactionStatusResponse, error) {
-			n := atomic.AddInt32(&tickCount, 1)
+			n := atomic.AddInt32(&pollCount, 1)
 			st := "PROCESSING"
 			if n > 1 {
 				st = "FINISHED"
@@ -77,9 +90,7 @@ func TestWorker_HappyPath(t *testing.T) {
 			}, nil
 		},
 	}
-	clockNow := now
-	clock := func() time.Time { return clockNow }
-	w, store := newTestWorker(t, client, clock)
+	w, store := newTestWorker(t, client, time.Now) // use real clock so sleeps elapse
 
 	sub := stripenav.Submission{
 		EventID:       "evt_happy",
@@ -87,7 +98,7 @@ func TestWorker_HappyPath(t *testing.T) {
 		Status:        stripenav.StatusPending,
 		IssuedAt:      now,
 		CreatedAt:     now,
-		NextAttemptAt: now,
+		NextAttemptAt: now.Add(-time.Second),
 		RawEvent:      sampleInvoiceData(),
 	}
 	if err := store.Put(context.Background(), sub); err != nil {
@@ -95,41 +106,21 @@ func TestWorker_HappyPath(t *testing.T) {
 	}
 
 	if err := w.Tick(context.Background()); err != nil {
-		t.Fatalf("tick1: %v", err)
+		t.Fatalf("tick: %v", err)
 	}
+
 	got, _ := store.Get(context.Background(), "evt_happy")
-	if got.Status != stripenav.StatusSubmitted || got.TransactionID != "T1" {
-		t.Fatalf("after submit: %+v", got)
-	}
-
-	clockNow = clockNow.Add(time.Minute)
-	_ = store.UpdateStatus(context.Background(), got.EventID, func(s *stripenav.Submission) error {
-		s.NextAttemptAt = clockNow.Add(-time.Second)
-		return nil
-	})
-
-	if err := w.Tick(context.Background()); err != nil {
-		t.Fatalf("tick2: %v", err)
-	}
-	got, _ = store.Get(context.Background(), "evt_happy")
-	if got.Status != stripenav.StatusProcessing {
-		t.Fatalf("after first poll: status=%s", got.Status)
-	}
-
-	clockNow = clockNow.Add(time.Minute)
-	_ = store.UpdateStatus(context.Background(), got.EventID, func(s *stripenav.Submission) error {
-		s.NextAttemptAt = clockNow.Add(-time.Second)
-		return nil
-	})
-	if err := w.Tick(context.Background()); err != nil {
-		t.Fatalf("tick3: %v", err)
-	}
-	got, _ = store.Get(context.Background(), "evt_happy")
 	if got.Status != stripenav.StatusAccepted {
-		t.Fatalf("final status = %s, want accepted", got.Status)
+		t.Fatalf("final status = %s (want accepted); attempts=%d txid=%s last=%q",
+			got.Status, got.Attempts, got.TransactionID, got.LastError)
+	}
+	if got.TransactionID != "T1" {
+		t.Errorf("TransactionID = %q, want T1", got.TransactionID)
 	}
 }
 
+// TestWorker_24HourDeadline: row issued >24h ago is aborted immediately
+// without any NAV call.
 func TestWorker_24HourDeadline(t *testing.T) {
 	issued := time.Date(2026, 5, 26, 8, 0, 0, 0, time.UTC)
 	clockNow := issued.Add(25 * time.Hour)
@@ -146,7 +137,7 @@ func TestWorker_24HourDeadline(t *testing.T) {
 		Status:        stripenav.StatusPending,
 		IssuedAt:      issued,
 		CreatedAt:     issued,
-		NextAttemptAt: clockNow,
+		NextAttemptAt: time.Now().Add(-time.Second), // due now in real time
 		RawEvent:      sampleInvoiceData(),
 	}); err != nil {
 		t.Fatal(err)
@@ -166,8 +157,11 @@ func TestWorker_24HourDeadline(t *testing.T) {
 	}
 }
 
+// TestWorker_TransientFailureRetries: first attempt fails with retriable
+// error. The lifecycle goroutine exits (because the backoff is well over
+// pollInterval). A second Tick after the backoff has elapsed picks up
+// the row and submits successfully.
 func TestWorker_TransientFailureRetries(t *testing.T) {
-	now := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
 	var calls int32
 	client := &fakeNAVClient{
 		submitFn: func(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
@@ -176,16 +170,23 @@ func TestWorker_TransientFailureRetries(t *testing.T) {
 			}
 			return nav.SubmitResult{TransactionID: "T2"}, nil
 		},
+		statusFn: func(ctx context.Context, tx string, _ bool) (schemas.QueryTransactionStatusResponse, error) {
+			return schemas.QueryTransactionStatusResponse{
+				ProcessingResults: schemas.ProcessingResults{
+					ProcessingResult: []schemas.ProcessingResult{{Index: 1, InvoiceStatus: "FINISHED"}},
+				},
+			}, nil
+		},
 	}
-	clockNow := now
-	w, store := newTestWorker(t, client, func() time.Time { return clockNow })
+	now := time.Now().UTC()
+	w, store := newTestWorker(t, client, time.Now)
 	if err := store.Put(context.Background(), stripenav.Submission{
 		EventID:       "evt_retry",
 		Kind:          stripenav.KindInvoice,
 		Status:        stripenav.StatusPending,
 		IssuedAt:      now,
 		CreatedAt:     now,
-		NextAttemptAt: now,
+		NextAttemptAt: now.Add(-time.Second),
 		RawEvent:      sampleInvoiceData(),
 	}); err != nil {
 		t.Fatal(err)
@@ -196,37 +197,46 @@ func TestWorker_TransientFailureRetries(t *testing.T) {
 	}
 	got, _ := store.Get(context.Background(), "evt_retry")
 	if got.Status != stripenav.StatusPending || got.Attempts != 1 {
-		t.Fatalf("after failure: %+v", got)
+		t.Fatalf("after failure: status=%s attempts=%d", got.Status, got.Attempts)
 	}
-	if !got.NextAttemptAt.After(now) {
-		t.Fatalf("NextAttemptAt should grow after failure, got %s vs %s", got.NextAttemptAt, now)
+	if !got.NextAttemptAt.After(time.Now()) {
+		t.Fatalf("NextAttemptAt should be in the future, got %s", got.NextAttemptAt)
 	}
 
-	clockNow = got.NextAttemptAt
+	// Pull NextAttemptAt back to "now" so ClaimBatch picks the row up,
+	// then drive the retry.
+	_ = store.UpdateStatus(context.Background(), "evt_retry", func(s *stripenav.Submission) error {
+		s.NextAttemptAt = time.Now().Add(-time.Second)
+		return nil
+	})
 	if err := w.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = store.Get(context.Background(), "evt_retry")
-	if got.Status != stripenav.StatusSubmitted || got.TransactionID != "T2" {
-		t.Fatalf("after retry: %+v", got)
+	// After retry succeeds, the lifecycle goroutine drives through poll
+	// (FINISHED) to accepted, all within the same Tick.
+	if got.Status != stripenav.StatusAccepted || got.TransactionID != "T2" {
+		t.Fatalf("after retry: status=%s txid=%s", got.Status, got.TransactionID)
 	}
 }
 
+// TestWorker_NonRetriableErrorRejects: first attempt fails with a
+// non-retriable error → row moves to rejected immediately.
 func TestWorker_NonRetriableErrorRejects(t *testing.T) {
-	now := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
 	client := &fakeNAVClient{
 		submitFn: func(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
 			return nav.SubmitResult{}, &nav.NAVError{HTTPStatus: 400, Code: "INVALID_REQUEST", Retriable: false, Message: "bad"}
 		},
 	}
-	w, store := newTestWorker(t, client, func() time.Time { return now })
+	w, store := newTestWorker(t, client, time.Now)
+	now := time.Now().UTC()
 	if err := store.Put(context.Background(), stripenav.Submission{
 		EventID:       "evt_bad",
 		Kind:          stripenav.KindInvoice,
 		Status:        stripenav.StatusPending,
 		IssuedAt:      now,
 		CreatedAt:     now,
-		NextAttemptAt: now,
+		NextAttemptAt: now.Add(-time.Second),
 		RawEvent:      sampleInvoiceData(),
 	}); err != nil {
 		t.Fatal(err)

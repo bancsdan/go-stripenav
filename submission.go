@@ -71,6 +71,14 @@ type Submission struct {
 	// can re-derive the NAV InvoiceData without depending on Stripe API
 	// availability.
 	RawEvent []byte
+
+	// ClaimedBy is the id of the worker currently holding a claim on
+	// this row (empty if unclaimed). Set by SubmissionStore.ClaimBatch /
+	// RenewClaim; cleared by ReleaseClaim or claim expiry.
+	ClaimedBy string
+	// ClaimedUntil is when the current claim lease expires. After this
+	// instant another worker can take the row regardless of ClaimedBy.
+	ClaimedUntil time.Time
 }
 
 // validTransitions encodes the legal next-states for each current state.
@@ -126,9 +134,23 @@ func (s *Submission) IsTerminal() bool {
 // requested event id is unknown.
 var ErrNotFound = errors.New("stripenav: submission not found")
 
+// ErrClaimLost is returned by RenewClaim and ReleaseClaim when the
+// caller's claim is no longer valid (lease expired, taken by another
+// worker, or the row no longer exists). Callers should treat this as
+// "stop processing this submission, another worker has it now."
+var ErrClaimLost = errors.New("stripenav: claim lost")
+
 // SubmissionStore is the persistence interface the bridge depends on.
-// Implementations MUST make UpdateStatus atomic: concurrent calls against
-// the same event id must serialise so neither mutation is lost.
+//
+// The store doubles as a distributed work queue: ClaimBatch reserves
+// non-terminal submissions for a single claimer at a time, with a TTL
+// lease so a crashed claimer's work eventually becomes available to
+// others. Implementations MUST ensure ClaimBatch is atomic across
+// concurrent callers — two ClaimBatch invocations with different
+// claimer ids MUST NOT both return the same row.
+//
+// Beyond ClaimBatch, UpdateStatus MUST be atomic per-row: concurrent
+// mutators of the same row serialise.
 type SubmissionStore interface {
 	// Put inserts a new submission. It MUST fail (any non-nil error) if
 	// an entry with the same EventID already exists, so the handler can
@@ -140,13 +162,29 @@ type SubmissionStore interface {
 
 	// UpdateStatus atomically reads, mutates, and writes the submission
 	// identified by eventID. The mut function MUST be the only place
-	// where Status, Attempts, LastError, NextAttemptAt and TransactionID
-	// are modified by the worker.
+	// where Status, Attempts, LastError, NextAttemptAt, TransactionID,
+	// or RawEvent are modified by the worker.
 	UpdateStatus(ctx context.Context, eventID string, mut func(*Submission) error) error
 
-	// ListPending returns up to limit submissions whose status is
-	// non-terminal and whose NextAttemptAt <= before.
-	ListPending(ctx context.Context, before time.Time, limit int) ([]Submission, error)
+	// ClaimBatch reserves up to limit non-terminal submissions whose
+	// NextAttemptAt <= now and whose existing claim has expired (if
+	// any). The claimer holds each returned row for lease, after which
+	// it becomes claimable by another worker.
+	//
+	// Implementations MUST return claimed Submissions with their
+	// ClaimedBy and ClaimedUntil fields populated to reflect the
+	// just-applied claim.
+	ClaimBatch(ctx context.Context, claimer string, limit int, lease time.Duration) ([]Submission, error)
+
+	// RenewClaim extends the lease on a previously-claimed row. Returns
+	// ErrClaimLost if claimer is no longer the holder.
+	RenewClaim(ctx context.Context, eventID, claimer string, lease time.Duration) error
+
+	// ReleaseClaim clears claimer's hold on the row. Returns ErrClaimLost
+	// if claimer is no longer the holder. ReleaseClaim does NOT change
+	// the submission's status or NextAttemptAt — callers UpdateStatus
+	// first, then release.
+	ReleaseClaim(ctx context.Context, eventID, claimer string) error
 
 	// FindByInvoiceNumber returns every submission previously recorded
 	// for the given NAV invoice number. Used by the handler to discover

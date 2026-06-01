@@ -98,9 +98,10 @@ func marshalEvent(t *testing.T, id, typ string, inv map[string]any) []byte {
 func tickOnce(t *testing.T, store stripenav.SubmissionStore, fake stripenav.NAVClient) {
 	t.Helper()
 	w, err := stripenav.NewWorker(stripenav.WorkerConfig{
-		Store:        store,
-		Client:       fake,
-		TickInterval: time.Second,
+		Store:     store,
+		Client:    fake,
+		ClaimerID: "test",
+		MaxSleep:  time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewWorker: %v", err)
@@ -228,7 +229,7 @@ func TestHandler_VoidedInvoiceSubmitsStorno(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if sub.InvoiceNumber != "2026-V1-STORNO" || sub.Status != stripenav.StatusSubmitted || sub.TransactionID != "T-STORNO" {
+	if sub.InvoiceNumber != "2026-V1-STORNO" || sub.Status != stripenav.StatusAccepted || sub.TransactionID != "T-STORNO" {
 		t.Fatalf("submission state: %+v", sub)
 	}
 }
@@ -262,7 +263,7 @@ func TestHandler_FinalizedInvoiceSubmitsAndStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get: %v", err)
 	}
-	if got.Status != stripenav.StatusSubmitted || got.TransactionID != "T-OK" {
+	if got.Status != stripenav.StatusAccepted || got.TransactionID != "T-OK" {
 		t.Fatalf("submission state: %+v", got)
 	}
 }

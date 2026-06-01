@@ -57,12 +57,28 @@ type Config struct {
 	// tests where ticks would race with the test scenario.
 	DisableWorker bool
 
-	// WorkerTickInterval overrides how often the background worker
-	// scans the store for pending work. Defaults to 30s. Set to a few
-	// seconds during local development so submissions are processed
-	// without a long wait; leave at the default in production where
-	// snappiness matters less than respecting NAV's rate budget.
-	WorkerTickInterval time.Duration
+	// WorkerMaxSleep bounds how long the background worker sleeps
+	// between store scans. Wakeup signals from the webhook handler can
+	// interrupt this sleep for locally-arrived rows; the sleep caps
+	// catch retries, status polls, and rows arriving on other replicas.
+	// Defaults to 10s. Leave at default for prod.
+	WorkerMaxSleep time.Duration
+
+	// WorkerPollInterval is how often a lifecycle goroutine re-queries
+	// queryTransactionStatus while a submission is in flight on NAV.
+	// Defaults to 5s.
+	WorkerPollInterval time.Duration
+
+	// WorkerLeaseDuration is the TTL on a claim. If a worker crashes
+	// mid-processing, another replica can take the row after this long.
+	// Defaults to 60s.
+	WorkerLeaseDuration time.Duration
+
+	// WorkerClaimerID identifies this replica when claiming rows.
+	// Defaults to hostname + a random suffix. In multi-replica
+	// deployments, leaving this unset is fine; the random suffix
+	// makes collisions vanishingly unlikely.
+	WorkerClaimerID string
 
 	// navClient is an injection seam for unit tests. Production callers
 	// never set this directly; the Handler constructor builds a real
@@ -119,13 +135,16 @@ func Handler(cfg Config, opts ...Option) (*BridgeHandler, error) {
 	h := &BridgeHandler{cfg: cfg}
 	if !cfg.DisableWorker {
 		worker, err := NewWorker(WorkerConfig{
-			Store:        cfg.Store,
-			Client:       cfg.navClient,
-			Supplier:     cfg.Supplier,
-			Logger:       cfg.Logger,
-			Metrics:      cfg.Metrics,
-			Clock:        cfg.Clock,
-			TickInterval: cfg.WorkerTickInterval,
+			Store:         cfg.Store,
+			Client:        cfg.navClient,
+			Supplier:      cfg.Supplier,
+			Logger:        cfg.Logger,
+			Metrics:       cfg.Metrics,
+			Clock:         cfg.Clock,
+			ClaimerID:     cfg.WorkerClaimerID,
+			MaxSleep:      cfg.WorkerMaxSleep,
+			PollInterval:  cfg.WorkerPollInterval,
+			LeaseDuration: cfg.WorkerLeaseDuration,
 		})
 		if err != nil {
 			return nil, err
@@ -323,7 +342,13 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 	payload = append([]byte(xml.Header), payload...)
 	sub.RawEvent = payload // store the mapped XML so the worker can retry without re-mapping.
 
-	return h.cfg.Store.Put(ctx, *sub)
+	if err := h.cfg.Store.Put(ctx, *sub); err != nil {
+		return err
+	}
+	if h.worker != nil {
+		h.worker.Wakeup()
+	}
+	return nil
 }
 
 // findParentSubmission looks up a previously-recorded submission whose
@@ -407,7 +432,13 @@ func (h *BridgeHandler) processCreditNote(ctx context.Context, event *stripe.Eve
 	payload = append([]byte(xml.Header), payload...)
 	sub.RawEvent = payload
 	sub.Operation = "MODIFY"
-	return h.cfg.Store.Put(ctx, *sub)
+	if err := h.cfg.Store.Put(ctx, *sub); err != nil {
+		return err
+	}
+	if h.worker != nil {
+		h.worker.Wakeup()
+	}
+	return nil
 }
 
 func (h *BridgeHandler) rateFor(ctx context.Context, currency string) (string, error) {

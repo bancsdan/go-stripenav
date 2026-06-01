@@ -61,7 +61,7 @@ func TestStore_UpdateStatusAtomic(t *testing.T) {
 	}
 }
 
-func TestStore_ListPendingFilters(t *testing.T) {
+func TestStore_ClaimBatchFiltersAndOrders(t *testing.T) {
 	s := storeinmem.New()
 	ctx := context.Background()
 	now := time.Now()
@@ -76,14 +76,82 @@ func TestStore_ListPendingFilters(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	out, err := s.ListPending(ctx, now, 10)
+	out, err := s.ClaimBatch(ctx, "worker-1", 10, 60*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(out) != 2 {
-		t.Fatalf("ListPending returned %d rows, want 2", len(out))
+		t.Fatalf("ClaimBatch returned %d rows, want 2", len(out))
 	}
 	if out[0].EventID != "a" || out[1].EventID != "d" {
-		t.Fatalf("ListPending order: got [%s %s], want [a d]", out[0].EventID, out[1].EventID)
+		t.Fatalf("ClaimBatch order: got [%s %s], want [a d]", out[0].EventID, out[1].EventID)
+	}
+	for _, c := range out {
+		if c.ClaimedBy != "worker-1" {
+			t.Errorf("row %s has ClaimedBy=%q, want worker-1", c.EventID, c.ClaimedBy)
+		}
+		if c.ClaimedUntil.IsZero() {
+			t.Errorf("row %s has zero ClaimedUntil", c.EventID)
+		}
+	}
+}
+
+func TestStore_ClaimBatchSkipsClaimedRows(t *testing.T) {
+	s := storeinmem.New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.Put(ctx, stripenav.Submission{
+		EventID: "shared", Status: stripenav.StatusPending,
+		NextAttemptAt: now.Add(-time.Second), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ClaimBatch(ctx, "worker-A", 10, 60*time.Second)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first claim: %v %+v", err, first)
+	}
+	second, err := s.ClaimBatch(ctx, "worker-B", 10, 60*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("worker-B should not see row claimed by worker-A; got %+v", second)
+	}
+}
+
+func TestStore_RenewAndReleaseClaim(t *testing.T) {
+	s := storeinmem.New()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := s.Put(ctx, stripenav.Submission{
+		EventID: "evt", Status: stripenav.StatusPending,
+		NextAttemptAt: now.Add(-time.Second), CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _ := s.ClaimBatch(ctx, "worker-A", 1, 60*time.Second)
+	if len(claimed) != 1 {
+		t.Fatalf("expected 1 claim, got %d", len(claimed))
+	}
+	originalUntil := claimed[0].ClaimedUntil
+
+	if err := s.RenewClaim(ctx, "evt", "worker-A", 120*time.Second); err != nil {
+		t.Fatalf("RenewClaim: %v", err)
+	}
+	got, _ := s.Get(ctx, "evt")
+	if !got.ClaimedUntil.After(originalUntil) {
+		t.Errorf("ClaimedUntil did not extend: was %v, now %v", originalUntil, got.ClaimedUntil)
+	}
+
+	if err := s.RenewClaim(ctx, "evt", "imposter", 60*time.Second); !errors.Is(err, stripenav.ErrClaimLost) {
+		t.Errorf("RenewClaim by imposter: got %v, want ErrClaimLost", err)
+	}
+
+	if err := s.ReleaseClaim(ctx, "evt", "worker-A"); err != nil {
+		t.Fatalf("ReleaseClaim: %v", err)
+	}
+	got, _ = s.Get(ctx, "evt")
+	if got.ClaimedBy != "" {
+		t.Errorf("ClaimedBy not cleared after release: %q", got.ClaimedBy)
 	}
 }
