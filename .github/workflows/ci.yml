@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref so a flurry of pushes doesn't
 # pile up against NAV's test endpoint.
