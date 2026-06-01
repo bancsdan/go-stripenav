@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same ref so a flurry of pushes doesn't
+# pile up against NAV's test endpoint.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,3 +27,31 @@ jobs:
 
       - name: Test
         run: go test ./... -race -count=1
+
+  e2e:
+    name: e2e (NAV test env)
+    runs-on: ubuntu-latest
+    # Secrets are not exposed to PRs from forks — the test helpers call
+    # t.Skip when env is missing, so the job passes neutrally on forks.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: E2E
+        env:
+          NAV_BASE_URL: ${{ secrets.NAV_BASE_URL }}
+          NAV_LOGIN: ${{ secrets.NAV_LOGIN }}
+          NAV_PASSWORD: ${{ secrets.NAV_PASSWORD }}
+          NAV_TAX_NUMBER: ${{ secrets.NAV_TAX_NUMBER }}
+          NAV_SIGN_KEY: ${{ secrets.NAV_SIGN_KEY }}
+          NAV_EXCHANGE_KEY: ${{ secrets.NAV_EXCHANGE_KEY }}
+          SUPPLIER_TAX_NUMBER: ${{ secrets.SUPPLIER_TAX_NUMBER }}
+          SUPPLIER_NAME: ${{ secrets.SUPPLIER_NAME }}
+          SUPPLIER_COUNTRY: ${{ secrets.SUPPLIER_COUNTRY }}
+          SUPPLIER_POSTAL_CODE: ${{ secrets.SUPPLIER_POSTAL_CODE }}
+          SUPPLIER_CITY: ${{ secrets.SUPPLIER_CITY }}
+          SUPPLIER_ADDRESS: ${{ secrets.SUPPLIER_ADDRESS }}
+        run: go test -tags=navtest -count=1 -v ./e2e/... -timeout=180s
