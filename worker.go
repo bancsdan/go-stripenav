@@ -315,8 +315,11 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 		// Re-read the row after acting on it.
 		fresh, err := w.store.Get(ctx, sub.EventID)
 		if err != nil {
-			w.logger.Warn("stripenav: post-action get failed",
-				"event_id", sub.EventID, "err", err)
+			// Shutdown races cancel ctx mid-loop; that's expected, not a warning.
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				w.logger.Warn("stripenav: post-action get failed",
+					"event_id", sub.EventID, "err", err)
+			}
 			return
 		}
 		sub = fresh
