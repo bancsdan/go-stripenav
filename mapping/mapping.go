@@ -146,8 +146,26 @@ func MapInvoice(inv *stripe.Invoice, opts MapOptions) (schemas.InvoiceData, erro
 		PaymentMethod:       opts.PaymentMethod,
 		InvoiceAppearance:   opts.InvoiceAppearance,
 	}
-	if inv.DueDate > 0 {
+	// §58 continuous-service / periodic settlement. Stripe billing_reason
+	// values starting with "subscription_" cover the cycle/create/update/
+	// threshold cases — all of them have populated period_start/period_end
+	// describing the service window. We're advance-billing the upcoming
+	// period (Stripe's default for charge_automatically), so the §58 tax
+	// point equals the invoice issue date (already in InvoiceDeliveryDate).
+	if strings.HasPrefix(string(inv.BillingReason), "subscription_") &&
+		inv.PeriodStart > 0 && inv.PeriodEnd > 0 {
+		detail.InvoiceDeliveryPeriodStart = time.Unix(inv.PeriodStart, 0).UTC().Format("2006-01-02")
+		detail.InvoiceDeliveryPeriodEnd = time.Unix(inv.PeriodEnd, 0).UTC().Format("2006-01-02")
+		t := true
+		detail.PeriodicalSettlement = &t
+	}
+	switch {
+	case inv.DueDate > 0:
 		detail.PaymentDate = time.Unix(inv.DueDate, 0).UTC().Format("2006-01-02")
+	case detail.PaymentMethod == "CARD":
+		// charge_automatically card flows have no due_date — the card is
+		// charged on finalization, so payment date = issue date.
+		detail.PaymentDate = issued.Format("2006-01-02")
 	}
 
 	summary := buildSummary(byRate, totals, currency)

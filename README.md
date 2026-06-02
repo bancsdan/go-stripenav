@@ -119,6 +119,14 @@ Implementation details:
   parent CREATE to be `accepted` on NAV's side before submitting.
 - **24-hour deadline**: submissions that miss it transition to `aborted`
   with an error-level log.
+- **§58 continuous-service / subscription billing**: when Stripe's
+  `billing_reason` starts with `subscription_`, the invoice is mapped
+  as a periodic settlement (`periodicalSettlement=true`,
+  `invoiceDeliveryPeriodStart/End` from `period_start/period_end`). The
+  §58 tax point is set to the invoice issue date, matching the
+  *advance-billing* rule — Stripe's default for
+  `collection_method=charge_automatically`, where the card is charged on
+  finalization at the start of the cycle.
 
 ## Configuration
 
@@ -227,6 +235,26 @@ github.com/bancsdan/go-stripenav
 - **Shipping a production-grade `SubmissionStore`.** The
   [stripenav service repo](https://github.com/bancsdan/stripenav)
   packages a Postgres adapter that's ready to use.
+- **§58 subsequent-billing (utólagos számlázás).** Only the
+  advance-billing rule is implemented — invoice issue date is taken as
+  the tax point. Subsequent billing (invoice issued *after* the service
+  period ends, e.g. usage-based / metered subscriptions invoiced in
+  arrears) requires a different tax-point computation including the
+  "+60 days from period-end" clamp, and is not handled. If you turn on
+  Stripe metered billing (`usage_type=metered`) or otherwise invoice in
+  arrears, the resulting NAV submissions will report the wrong tax
+  point.
+- **`electronicInvoiceHash`.** Optional under the current
+  `completenessIndicator=false` mode — not computed or submitted. If you
+  ever switch to `completenessIndicator=true` (using NAV as the invoice
+  delivery channel rather than Stripe's PDF), this hash becomes
+  mandatory and is not yet supported.
+- **`paymentMethod` auto-derivation.** The value is caller-supplied via
+  `MapOptions.PaymentMethod` (default `CARD`). It is not derived from
+  `invoice.collection_method` or
+  `invoice.charge.payment_method_details`. If you mix card and bank
+  transfer collection on the same store, you must override per
+  invoice.
 
 ## Testing
 

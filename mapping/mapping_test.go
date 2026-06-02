@@ -250,6 +250,93 @@ func TestMapInvoice_ModifyOperation(t *testing.T) {
 	}
 }
 
+func TestMapInvoice_SubscriptionAdvanceBilling(t *testing.T) {
+	// Monthly subscription invoice: finalized & paid 2026-01-01, covers
+	// the 2026-01-01 → 2026-01-31 service period. Under §58 advance-billing
+	// the tax point equals the invoice issue date.
+	inv := makeInvoice("2026/00010", "huf", 1_767_225_600, []*stripe.InvoiceLineItem{
+		huLine("Monthly plan", 1_000_000, 270_000),
+	})
+	inv.BillingReason = stripe.InvoiceBillingReasonSubscriptionCycle
+	inv.PeriodStart = 1_767_225_600 // 2026-01-01 UTC
+	inv.PeriodEnd = 1_769_817_600   // 2026-01-31 UTC
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	d := got.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail
+	if d.PeriodicalSettlement == nil || !*d.PeriodicalSettlement {
+		t.Errorf("PeriodicalSettlement = %v, want true", d.PeriodicalSettlement)
+	}
+	if d.InvoiceDeliveryPeriodStart != "2026-01-01" {
+		t.Errorf("InvoiceDeliveryPeriodStart = %q", d.InvoiceDeliveryPeriodStart)
+	}
+	if d.InvoiceDeliveryPeriodEnd != "2026-01-31" {
+		t.Errorf("InvoiceDeliveryPeriodEnd = %q", d.InvoiceDeliveryPeriodEnd)
+	}
+	// §58 advance-billing: tax point = issue date.
+	if d.InvoiceDeliveryDate != "2026-01-01" {
+		t.Errorf("InvoiceDeliveryDate = %q, want issue date 2026-01-01", d.InvoiceDeliveryDate)
+	}
+	// CARD fallback: no due_date → payment date = issue date.
+	if d.PaymentDate != "2026-01-01" {
+		t.Errorf("PaymentDate = %q, want 2026-01-01", d.PaymentDate)
+	}
+}
+
+func TestMapInvoice_OneOffNoPeriodicalSettlement(t *testing.T) {
+	inv := makeInvoice("2026/00011", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+	// One-off / manual invoice: no subscription, no period.
+	inv.BillingReason = stripe.InvoiceBillingReasonManual
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	d := got.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail
+	if d.PeriodicalSettlement != nil {
+		t.Errorf("PeriodicalSettlement = %v, want nil", *d.PeriodicalSettlement)
+	}
+	if d.InvoiceDeliveryPeriodStart != "" || d.InvoiceDeliveryPeriodEnd != "" {
+		t.Errorf("period fields populated on one-off: start=%q end=%q",
+			d.InvoiceDeliveryPeriodStart, d.InvoiceDeliveryPeriodEnd)
+	}
+}
+
+func TestMapInvoice_PaymentDateFallback(t *testing.T) {
+	inv := makeInvoice("2026/00012", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+	// No DueDate, default PaymentMethod (CARD).
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	d := got.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail
+	if d.PaymentDate == "" || d.PaymentDate != d.InvoiceDeliveryDate {
+		t.Errorf("PaymentDate = %q, want = InvoiceDeliveryDate %q",
+			d.PaymentDate, d.InvoiceDeliveryDate)
+	}
+
+	// Non-CARD payment with no due date → no synthesis.
+	inv2 := makeInvoice("2026/00013", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+	got2, err := MapInvoice(inv2, MapOptions{
+		Supplier:      defaultSupplier(),
+		PaymentMethod: "TRANSFER",
+	})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	if d2 := got2.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail; d2.PaymentDate != "" {
+		t.Errorf("non-CARD PaymentDate = %q, want empty", d2.PaymentDate)
+	}
+}
+
 func TestMapInvoice_MarshalsToXML(t *testing.T) {
 	inv := makeInvoice("2026/00008", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
 		huLine("Service", 1_000_000, 270_000),

@@ -99,13 +99,19 @@ type DetailedAddress struct {
 }
 
 type InvoiceDetail struct {
-	InvoiceCategory     string `xml:"invoiceCategory"` // NORMAL, SIMPLIFIED, AGGREGATE
-	InvoiceDeliveryDate string `xml:"invoiceDeliveryDate"`
-	CurrencyCode        string `xml:"currencyCode"` // ISO 4217
-	ExchangeRate        string `xml:"exchangeRate"`
-	PaymentMethod       string `xml:"paymentMethod,omitempty"` // TRANSFER, CARD, CASH, OTHER
-	PaymentDate         string `xml:"paymentDate,omitempty"`
-	InvoiceAppearance   string `xml:"invoiceAppearance"` // PAPER, ELECTRONIC, EDI, UNKNOWN
+	InvoiceCategory            string `xml:"invoiceCategory"` // NORMAL, SIMPLIFIED, AGGREGATE
+	InvoiceDeliveryDate        string `xml:"invoiceDeliveryDate"`
+	InvoiceDeliveryPeriodStart string `xml:"invoiceDeliveryPeriodStart,omitempty"`
+	InvoiceDeliveryPeriodEnd   string `xml:"invoiceDeliveryPeriodEnd,omitempty"`
+	// PeriodicalSettlement marks a §58 continuous-service invoice.
+	// Pointer so the element is omitted entirely when unset (vs. emitting
+	// the default "false" for a value type).
+	PeriodicalSettlement *bool  `xml:"periodicalSettlement,omitempty"`
+	CurrencyCode         string `xml:"currencyCode"` // ISO 4217
+	ExchangeRate         string `xml:"exchangeRate"`
+	PaymentMethod        string `xml:"paymentMethod,omitempty"` // TRANSFER, CARD, CASH, OTHER
+	PaymentDate          string `xml:"paymentDate,omitempty"`
+	InvoiceAppearance    string `xml:"invoiceAppearance"` // PAPER, ELECTRONIC, EDI, UNKNOWN
 }
 
 type InvoiceLines struct {
