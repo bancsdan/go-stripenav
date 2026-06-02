@@ -105,9 +105,16 @@ Implementation details:
   hash, SHA3-512 request signature, AES-128-ECB exchange-token
   decryption with PKCS#7 unpadding.
 - **Persist-then-async**: the webhook handler verifies, persists, returns
-  200. A background worker polls the store, submits to NAV, polls
+  200, and signals the worker. The worker submits to NAV, polls
   transaction status, and retries transient failures with exponential
   backoff (`30s` base, `15m` cap, ±20% jitter).
+- **Wakeup-or-sleep pacing**: the worker reacts to handler signals
+  immediately and otherwise wakes on a bounded sleep — no fixed-tick
+  polling. Each claimed row is driven by its own short-lived goroutine.
+- **Multi-replica safe**: rows are claimed via
+  `SELECT … FOR UPDATE SKIP LOCKED` with a TTL lease, so multiple
+  replicas process disjoint work and crashed claims are recovered
+  automatically.
 - **Parent dependency tracking**: a STORNO submission waits for its
   parent CREATE to be `accepted` on NAV's side before submitting.
 - **24-hour deadline**: submissions that miss it transition to `aborted`
@@ -127,6 +134,12 @@ type Config struct {
     Clock                func() time.Time // defaults to time.Now
     AcceptTimeout        time.Duration   // bounds the persist work; defaults to 5s
     DisableWorker        bool
+
+    // Worker pacing — leave at zero for sensible defaults.
+    WorkerMaxSleep       time.Duration  // bound between store scans; default 10s
+    WorkerPollInterval   time.Duration  // gap between NAV status polls; default 5s
+    WorkerLeaseDuration  time.Duration  // claim TTL; default 60s
+    WorkerClaimerID      string         // identifier; defaults to hostname + random suffix
     // unexported test injection seam — use stripenav.WithNAVClient(fake)
 }
 ```
@@ -150,16 +163,25 @@ type SubmissionStore interface {
     Put(ctx context.Context, s Submission) error
     Get(ctx context.Context, eventID string) (Submission, error)
     UpdateStatus(ctx context.Context, eventID string, mut func(*Submission) error) error
-    ListPending(ctx context.Context, before time.Time, limit int) ([]Submission, error)
+    ClaimBatch(ctx context.Context, claimer string, limit int, lease time.Duration) ([]Submission, error)
+    RenewClaim(ctx context.Context, eventID, claimer string, lease time.Duration) error
+    ReleaseClaim(ctx context.Context, eventID, claimer string) error
     FindByInvoiceNumber(ctx context.Context, invoiceNumber string) ([]Submission, error)
 }
 ```
 
-`UpdateStatus` must be atomic — the simplest implementation uses
-`SELECT … FOR UPDATE` inside a transaction.
+`ClaimBatch` is the multi-replica safety primitive: it must hand out
+each row to at most one caller and grant a TTL lease so a crashed
+claimer's work becomes claimable again after the lease expires. The
+canonical Postgres implementation is
+`UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED)`. `UpdateStatus` must
+be atomic with respect to concurrent claims on the same row. Methods
+that target a specific claim (`RenewClaim`, `ReleaseClaim`) must
+return `stripenav.ErrClaimLost` if the claim is no longer held.
 
-A working Postgres adapter (with embedded migration, atomic updates,
-multi-worker concurrency tests) lives in the
+A working Postgres adapter (with embedded migration, the canonical
+`SKIP LOCKED` claim query, and a multi-claimer concurrency test) lives
+in the
 [stripenav service repo](https://github.com/bancsdan/stripenav/tree/main/internal/storepg).
 Copy or vendor it if you want the same shape.
 
@@ -185,6 +207,8 @@ github.com/bancsdan/go-stripenav
 │   ├── errors.go           // *NAVError with retriability
 │   └── schemas/            // hand-written OSA/3.0/data, OSA/3.0/api, etc.
 ├── storeinmem/             // reference SubmissionStore for tests + dev
+├── e2e/                    // end-to-end harness against real NAV test env
+│                           // (//go:build navtest — skipped in default test run)
 └── docs/
     └── nav-api-samples/    // NAV-published sample requests for reference
 ```
@@ -204,18 +228,39 @@ github.com/bancsdan/go-stripenav
   [stripenav service repo](https://github.com/bancsdan/stripenav)
   packages a Postgres adapter that's ready to use.
 
-## Testing against NAV's test environment
+## Testing
 
-Unit tests cover signing, mapping, lifecycle, and handler behaviour
-(`go test ./... -race`). End-to-end tests against
-`api-test.onlineszamla.nav.gov.hu` are not part of the default run —
-register a test technical user on the NAV portal, set `nav.Config`
-appropriately, and replay a captured Stripe event through the handler.
+Unit tests cover signing, mapping, lifecycle, and handler behaviour:
+
+```bash
+task test         # go test ./... -count=1
+task test:race    # with -race
+```
+
+End-to-end tests against `api-test.onlineszamla.nav.gov.hu` live in the
+`e2e/` package and are gated behind the `navtest` build tag, so normal
+`go test ./...` never touches NAV. The harness signs a Stripe payload,
+posts it to a real `BridgeHandler`, waits for the background worker to
+reach `accepted`, and asserts that NAV returned a transaction id.
+
+To run locally:
+
+1. Register a technical user on the NAV portal, copy the credentials.
+2. `cp e2e/.env.example e2e/.env` and fill in the values (`e2e/.env`
+   is gitignored).
+3. `task test:e2e` — the Taskfile target loads `e2e/.env` and runs
+   `go test -tags=navtest -count=1 -v ./e2e/...`.
+
+In CI the same env vars are injected from repository secrets, so no
+`.env` file is required. The `.github/workflows/ci.yml` workflow runs
+the e2e job on every push to `main`, on every PR (skipping cleanly if
+the fork doesn't have access to secrets), and on manual
+`workflow_dispatch`.
 
 The [stripenav service repo](https://github.com/bancsdan/stripenav)
-ships task targets (`task stripe:scenario:void`,
-`task stripe:trigger EVENT=invoice.finalized`) that drive this
-end-to-end against the local container + the Stripe CLI.
+ships additional task targets (`task stripe:scenario:void`,
+`task stripe:trigger EVENT=invoice.finalized`) that drive Stripe-side
+scenarios against a locally-running container + the Stripe CLI.
 
 ## License
 
