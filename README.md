@@ -82,8 +82,8 @@ On the Stripe side, register a webhook endpoint at
 - `invoice.finalized`
 - `invoice.voided`
 - `invoice.marked_uncollectible`
-- `credit_note.created`
-- `credit_note.voided`
+- `credit_note.created` (see "Known credit-note limitations" below before subscribing)
+- `credit_note.voided` (see "Known credit-note limitations" below before subscribing)
 
 ## What it does
 
@@ -91,7 +91,8 @@ On the Stripe side, register a webhook endpoint at
 | --- | --- |
 | `invoice.finalized` | NAV `manageInvoice` operation `CREATE` |
 | `invoice.voided`, `invoice.marked_uncollectible` | NAV `manageInvoice` operation `STORNO` (mirror invoice with negative amounts referencing the original) |
-| `credit_note.created`, `credit_note.voided` | NAV `manageInvoice` operation `MODIFY` |
+| `credit_note.created` | NAV `manageInvoice` operation `MODIFY` — works for a single credit note against an invoice with exclusive-tax pricing; otherwise see limitations |
+| `credit_note.voided` | **Currently produces a duplicate negative MODIFY instead of a reversing MODIFY — see limitations** |
 | out-of-band admin call | NAV `manageAnnulment` via `(*BridgeHandler).AnnulInvoice` |
 
 Implementation details:
@@ -248,6 +249,32 @@ github.com/bancsdan/go-stripenav
 - **Shipping a production-grade `SubmissionStore`.** The
   [stripenav service repo](https://github.com/bancsdan/stripenav)
   packages a Postgres adapter that's ready to use.
+- **Reliable credit-note handling.** The current `credit_note.*` code
+  path has known bugs that misreport amounts to NAV. Until they're
+  fixed, do not subscribe to these events in production unless your
+  use case happens to dodge every gap below:
+
+  1. **`credit_note.voided` is mishandled.** Both `credit_note.created`
+     and `credit_note.voided` are routed through the same handler,
+     which always sign-flips amounts to negative. The created event
+     produces a correct negative-amount MODIFY (reducing the invoice
+     total). The voided event then produces *another* negative-amount
+     MODIFY instead of the positive reversing MODIFY that would undo
+     the first credit. Net effect: NAV sees `original − 2×credit`
+     instead of `original`. Silent data corruption.
+  2. **Inclusive tax behavior is dropped on credit notes.** When the
+     synthetic invoice is built from a credit note, `tax_behavior` is
+     not copied. Credit notes against Stripe Tax inclusive-priced
+     invoices (the B2C SaaS default) ship the wrong net/vat/gross
+     split and wrong VAT percentage to NAV.
+  3. **`modificationIndex` is hardcoded to 1.** A second credit note
+     against the same original invoice will collide with the first
+     and be rejected by NAV. The correct value is `1 + count of prior
+     MODIFY/STORNO submissions against the same invoice`, which would
+     require a `FindByInvoiceNumber` lookup; that lookup is not done.
+  4. **`pre_payment` vs `post_payment` credit notes are not
+     distinguished.** Áfa tv. §77 specifies different VAT-correction
+     timing for the two types; the mapper treats them identically.
 - **§58 subsequent-billing (utólagos számlázás).** Only the
   advance-billing rule is implemented — invoice issue date is taken as
   the tax point. Subsequent billing (invoice issued *after* the service
