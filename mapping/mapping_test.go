@@ -3,6 +3,7 @@ package mapping
 import (
 	"encoding/xml"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -363,6 +364,111 @@ func TestMapInvoice_PaymentDateFallback(t *testing.T) {
 	}
 	if d2 := got2.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail; d2.PaymentDate != "" {
 		t.Errorf("non-CARD PaymentDate = %q, want empty", d2.PaymentDate)
+	}
+}
+
+// TestMapInvoice_InclusiveTax verifies that Stripe Tax inclusive-pricing
+// invoices (where line.Amount carries the GROSS, not the net) are mapped
+// to NAV with the correct net/vat/gross split and VAT rate. This is the
+// shape produced when Stripe Tax computes 27% VAT inclusive on a HUF
+// SaaS line — using the exact numbers from a real trigger payload.
+func TestMapInvoice_InclusiveTax(t *testing.T) {
+	inv := makeInvoice("2026/00020", "huf", 1_780_428_400, []*stripe.InvoiceLineItem{
+		{
+			Description: "Havi előfizetés",
+			Amount:      1_000_000, // gross 10,000.00 HUF (includes VAT)
+			Quantity:    1,
+			Taxes: []*stripe.InvoiceLineItemTax{
+				{
+					Amount:      212_598, // VAT 2,125.98 HUF
+					TaxBehavior: "inclusive",
+				},
+			},
+		},
+	})
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	l := got.InvoiceMain.Invoice.InvoiceLines.Lines[0]
+	if l.LineAmountsNormal.LineNetAmountData.LineNetAmount != "7874.02" {
+		t.Errorf("inclusive lineNetAmount = %q, want 7874.02",
+			l.LineAmountsNormal.LineNetAmountData.LineNetAmount)
+	}
+	if l.LineAmountsNormal.LineVatData.LineVatAmount != "2125.98" {
+		t.Errorf("inclusive lineVatAmount = %q, want 2125.98",
+			l.LineAmountsNormal.LineVatData.LineVatAmount)
+	}
+	if l.LineAmountsNormal.LineGrossAmountData.LineGrossAmountNormal != "10000.00" {
+		t.Errorf("inclusive lineGross = %q, want 10000.00",
+			l.LineAmountsNormal.LineGrossAmountData.LineGrossAmountNormal)
+	}
+	if l.LineAmountsNormal.LineVatRate.VatPercentage != "0.27" {
+		t.Errorf("inclusive vatPercentage = %q, want 0.27 (bug if 0.21 — net would have been treated as gross)",
+			l.LineAmountsNormal.LineVatRate.VatPercentage)
+	}
+}
+
+// TestMapInvoice_NetVatGrossReconciles checks that at every rendered
+// level (line, per-rate summary, invoice summary) net + vat = gross
+// exactly, even when independent rounding of each from big.Rat would
+// otherwise drift by a fillér. NAV's validators reject inconsistent
+// totals.
+func TestMapInvoice_NetVatGrossReconciles(t *testing.T) {
+	// Construct a HUF invoice whose totals have non-trivial fractional
+	// HUF: net=100.4, vat=27.4, gross=127.8. Independent rounding would
+	// give 100, 27, 128 — i.e. 100 + 27 ≠ 128. With reconciliation we
+	// should see 100 + 27 = 127 in the summary HUF fields.
+	inv := makeInvoice("2026/00021", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		{
+			Description: "Drifty line",
+			Amount:      10_040, // net 100.40 HUF
+			Quantity:    1,
+			Taxes: []*stripe.InvoiceLineItemTax{
+				{Amount: 2_740}, // VAT 27.40 HUF
+			},
+		},
+	})
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	s := got.InvoiceMain.Invoice.InvoiceSummary
+	// HUF fields must reconcile: net + vat = gross (as integers).
+	netHUF := s.SummaryNormal.InvoiceNetAmountHUF
+	vatHUF := s.SummaryNormal.InvoiceVatAmountHUF
+	grossHUF := s.SummaryGrossData.InvoiceGrossAmountHUF
+	netI, _ := strconv.Atoi(netHUF)
+	vatI, _ := strconv.Atoi(vatHUF)
+	grossI, _ := strconv.Atoi(grossHUF)
+	if netI+vatI != grossI {
+		t.Errorf("invoice HUF totals don't reconcile: %d + %d = %d, want %d",
+			netI, vatI, netI+vatI, grossI)
+	}
+
+	// Per-rate summary row must reconcile too.
+	if len(s.SummaryNormal.SummaryByVatRate) == 0 {
+		t.Fatalf("no per-rate summary rows")
+	}
+	row := s.SummaryNormal.SummaryByVatRate[0]
+	rNet, _ := strconv.Atoi(row.VatRateNetData.VatRateNetAmountHUF)
+	rVat, _ := strconv.Atoi(row.VatRateVatData.VatRateVatAmountHUF)
+	rGross, _ := strconv.Atoi(row.VatRateGrossData.VatRateGrossAmountHUF)
+	if rNet+rVat != rGross {
+		t.Errorf("per-rate HUF row doesn't reconcile: %d + %d = %d, want %d",
+			rNet, rVat, rNet+rVat, rGross)
+	}
+
+	// And the line itself.
+	l := got.InvoiceMain.Invoice.InvoiceLines.Lines[0]
+	lNet, _ := strconv.Atoi(l.LineAmountsNormal.LineNetAmountData.LineNetAmountHUF)
+	lVat, _ := strconv.Atoi(l.LineAmountsNormal.LineVatData.LineVatAmountHUF)
+	lGross, _ := strconv.Atoi(l.LineAmountsNormal.LineGrossAmountData.LineGrossAmountNormalHUF)
+	if lNet+lVat != lGross {
+		t.Errorf("line HUF doesn't reconcile: %d + %d = %d, want %d",
+			lNet, lVat, lNet+lVat, lGross)
 	}
 }
 

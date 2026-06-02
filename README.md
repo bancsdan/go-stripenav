@@ -119,6 +119,17 @@ Implementation details:
   parent CREATE to be `accepted` on NAV's side before submitting.
 - **24-hour deadline**: submissions that miss it transition to `aborted`
   with an error-level log.
+- **Inclusive- and exclusive-tax pricing**: handled per Stripe line item.
+  When `taxes[].tax_behavior=inclusive` (Stripe Tax's default for
+  consumer-facing prices), `line.amount` is treated as the gross and
+  the net is derived as `amount - vat`. Exclusive lines (the default
+  when no Stripe Tax) treat `line.amount` as the net.
+- **Exact-rational money arithmetic**: all monetary amounts and VAT
+  rates flow through `math/big.Rat` — no `float64` in the money path.
+  Rendered net/vat/gross are reconciled at each level (line, per-rate
+  summary, invoice summary) so that `net + vat = gross` holds in the
+  emitted strings even when independent rounding of three big.Rats
+  would otherwise drift by a fillér.
 - **§58 continuous-service / subscription billing**: when the Stripe
   invoice covers a service period (`period_end > period_start`), it is
   mapped as a periodic settlement (`periodicalSettlement=true`,

@@ -344,15 +344,28 @@ func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operatio
 		if l == nil {
 			continue
 		}
-		net := amountFromMinor(l.Amount, currency)
+		amount := amountFromMinor(l.Amount, currency)
 		vat := new(big.Rat)
+		inclusive := false
 		for _, tx := range l.Taxes {
 			if tx == nil {
 				continue
 			}
 			vat.Add(vat, amountFromMinor(tx.Amount, currency))
+			// Stripe sets tax_behavior consistently across taxes on a
+			// single line (it's driven by the Price config), so checking
+			// any tax is sufficient. inclusive means l.Amount is gross
+			// (price-includes-VAT, B2C default); exclusive means net.
+			if string(tx.TaxBehavior) == "inclusive" {
+				inclusive = true
+			}
 		}
-		gross := new(big.Rat).Add(net, vat)
+		var net *big.Rat
+		if inclusive {
+			net = new(big.Rat).Sub(amount, vat)
+		} else {
+			net = amount
+		}
 		// NAV needs the effective rate for the line. Stripe v82 only
 		// exposes the tax rate ID on InvoiceLineItemTax, so we derive
 		// the percentage from the amounts. If net is zero, we fall back
@@ -385,6 +398,9 @@ func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operatio
 			description = fmt.Sprintf("Item %d", idx+1)
 		}
 
+		netStr, vatStr, grossStr := reconciledNetVatGross(net, vat, currency)
+		netHUFStr, vatHUFStr, grossHUFStr := reconciledNetVatGrossHUF(netHUF, vatHUF)
+
 		line := schemas.Line{
 			LineNumber:              idx + 1,
 			LineExpressionIndicator: false,
@@ -396,19 +412,19 @@ func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operatio
 			UnitPriceHUF:            formatHUF(new(big.Rat).Quo(netHUF, big.NewRat(maxInt64(1, l.Quantity), 1))),
 			LineAmountsNormal: &schemas.LineAmounts{
 				LineNetAmountData: schemas.LineNetAmount{
-					LineNetAmount:    formatAmount(net, currency),
-					LineNetAmountHUF: formatHUF(netHUF),
+					LineNetAmount:    netStr,
+					LineNetAmountHUF: netHUFStr,
 				},
 				LineVatRate: schemas.LineVatRate{
 					VatPercentage: ratePct.FloatString(2),
 				},
 				LineVatData: &schemas.LineVatAmount{
-					LineVatAmount:    formatAmount(vat, currency),
-					LineVatAmountHUF: formatHUF(vatHUF),
+					LineVatAmount:    vatStr,
+					LineVatAmountHUF: vatHUFStr,
 				},
 				LineGrossAmountData: &schemas.LineGrossAmount{
-					LineGrossAmountNormal:    formatAmount(gross, currency),
-					LineGrossAmountNormalHUF: formatHUF(toHUF(gross, rate)),
+					LineGrossAmountNormal:    grossStr,
+					LineGrossAmountNormalHUF: grossHUFStr,
 				},
 			},
 		}
@@ -448,41 +464,65 @@ func buildSummary(byRate map[string]*rateTotals, totals invoiceTotals, currency 
 	rows := make([]schemas.SummaryByVatRate, 0, len(keys))
 	for _, k := range keys {
 		b := byRate[k]
-		gross := new(big.Rat).Add(b.netFC, b.vatFC)
-		grossHUF := new(big.Rat).Add(b.netHUF, b.vatHUF)
+		netStr, vatStr, grossStr := reconciledNetVatGross(b.netFC, b.vatFC, currency)
+		netHUFStr, vatHUFStr, grossHUFStr := reconciledNetVatGrossHUF(b.netHUF, b.vatHUF)
 		rows = append(rows, schemas.SummaryByVatRate{
 			VatRate: schemas.LineVatRate{VatPercentage: ratePctFromKey(k)},
 			VatRateNetData: schemas.VatRateNetData{
-				VatRateNetAmount:    formatAmount(b.netFC, currency),
-				VatRateNetAmountHUF: formatHUF(b.netHUF),
+				VatRateNetAmount:    netStr,
+				VatRateNetAmountHUF: netHUFStr,
 			},
 			VatRateVatData: schemas.VatRateVatData{
-				VatRateVatAmount:    formatAmount(b.vatFC, currency),
-				VatRateVatAmountHUF: formatHUF(b.vatHUF),
+				VatRateVatAmount:    vatStr,
+				VatRateVatAmountHUF: vatHUFStr,
 			},
 			VatRateGrossData: schemas.VatRateGrossData{
-				VatRateGrossAmount:    formatAmount(gross, currency),
-				VatRateGrossAmountHUF: formatHUF(grossHUF),
+				VatRateGrossAmount:    grossStr,
+				VatRateGrossAmountHUF: grossHUFStr,
 			},
 		})
 	}
 
-	grossFC := new(big.Rat).Add(totals.netFC, totals.vatFC)
-	grossHUF := new(big.Rat).Add(totals.netHUF, totals.vatHUF)
+	totalNetStr, totalVatStr, totalGrossStr := reconciledNetVatGross(totals.netFC, totals.vatFC, currency)
+	totalNetHUFStr, totalVatHUFStr, totalGrossHUFStr := reconciledNetVatGrossHUF(totals.netHUF, totals.vatHUF)
 
 	return schemas.InvoiceSummary{
 		SummaryNormal: &schemas.SummaryNormal{
 			SummaryByVatRate:    rows,
-			InvoiceNetAmount:    formatAmount(totals.netFC, currency),
-			InvoiceNetAmountHUF: formatHUF(totals.netHUF),
-			InvoiceVatAmount:    formatAmount(totals.vatFC, currency),
-			InvoiceVatAmountHUF: formatHUF(totals.vatHUF),
+			InvoiceNetAmount:    totalNetStr,
+			InvoiceNetAmountHUF: totalNetHUFStr,
+			InvoiceVatAmount:    totalVatStr,
+			InvoiceVatAmountHUF: totalVatHUFStr,
 		},
 		SummaryGrossData: schemas.SummaryGrossData{
-			InvoiceGrossAmount:    formatAmount(grossFC, currency),
-			InvoiceGrossAmountHUF: formatHUF(grossHUF),
+			InvoiceGrossAmount:    totalGrossStr,
+			InvoiceGrossAmountHUF: totalGrossHUFStr,
 		},
 	}
+}
+
+// reconciledNetVatGross renders net/vat/gross such that the rendered
+// strings satisfy net + vat = gross exactly, even when independent
+// rounding of net, vat, and gross from a big.Rat would otherwise drift
+// by a fractional unit (NAV rejects invoiceNet+invoiceVat ≠ invoiceGross).
+// We render net and vat first, then reconstruct gross from the rounded
+// values so it always reconciles.
+func reconciledNetVatGross(net, vat *big.Rat, currency string) (netStr, vatStr, grossStr string) {
+	netStr = formatAmount(net, currency)
+	vatStr = formatAmount(vat, currency)
+	netR, _ := new(big.Rat).SetString(netStr)
+	vatR, _ := new(big.Rat).SetString(vatStr)
+	grossStr = formatAmount(new(big.Rat).Add(netR, vatR), currency)
+	return
+}
+
+func reconciledNetVatGrossHUF(net, vat *big.Rat) (netStr, vatStr, grossStr string) {
+	netStr = formatHUF(net)
+	vatStr = formatHUF(vat)
+	netR, _ := new(big.Rat).SetString(netStr)
+	vatR, _ := new(big.Rat).SetString(vatStr)
+	grossStr = formatHUF(new(big.Rat).Add(netR, vatR))
+	return
 }
 
 func ratePctFromKey(k string) string {
