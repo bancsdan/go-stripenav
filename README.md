@@ -330,6 +330,94 @@ ships additional task targets (`task stripe:scenario:void`,
 `task stripe:trigger EVENT=invoice.finalized`) that drive Stripe-side
 scenarios against a locally-running container + the Stripe CLI.
 
+## Contributing
+
+PRs welcome — open one against `main`. A few conventions to save you a
+review round-trip:
+
+- **Conventional Commits.** Subject in imperative mood, ≤72 chars, no
+  trailing period. Use a scope when it sharpens meaning
+  (`fix(mapping):`, `test(e2e):`, `docs(readme):`). One focused logical
+  change per commit — don't bundle unrelated edits, don't fragment one
+  change across several commits.
+- **Tests are required for new behaviour.** Mapping changes get unit
+  tests against representative Stripe payloads; worker changes get
+  store-driven tests with the in-memory store; NAV-client changes get
+  a captured-XML or HTTP-recorder test. If a bug fix doesn't have a
+  test pinning the fixed behaviour, the next change will silently
+  re-break it.
+- **Run the suite locally:** `task test:race` (race-enabled unit tests)
+  before pushing. E2E tests are optional locally — they need real NAV
+  test-environment credentials in `e2e/.env`. CI runs them on every PR.
+- **Money math uses `math/big.Rat`.** No `float64` anywhere in the
+  amount path. New code that touches monetary values must preserve
+  this: rationals all the way to the final string-render boundary.
+- **`net + vat = gross` must reconcile** in every emitted level (line,
+  per-rate summary, invoice summary). Render net and vat first, then
+  derive gross from the rounded values — never round the original
+  sum independently. `TestMapInvoice_NetVatGrossReconciles` pins the
+  contract.
+- **Schema changes preserve NAV XSD field order.** Go's `encoding/xml`
+  emits struct fields in declaration order; NAV validates field order
+  strictly. New `InvoiceDetail`/`Line`/`Summary` fields must slot into
+  the position they hold in the published XSD.
+- **Keep the README in sync.** If your change touches anything the
+  README documents (public API, config fields, store interface,
+  Stripe events handled, env vars, test commands, package layout, any
+  behaviour the README claims), update it in the same PR — or, if the
+  code must stay strictly isolated, in an adjacent `docs(readme):`
+  commit. A stale README is worse than no README.
+- **Don't add features beyond what the change requires.** Bug fixes
+  don't need surrounding refactors. One-shot helpers don't need
+  abstractions. Three similar lines beats a premature abstraction.
+
+## Roadmap
+
+Rough order of upcoming work, surfaced from the known limitations
+above. Pull requests covering any of these are welcome.
+
+**Correctness gaps (high priority):**
+
+1. **Fix `credit_note.*` handling.** The whole credit-note path needs
+   work — see "Reliable credit-note handling" above. Concretely:
+   - Split `credit_note.voided` into its own processor that emits a
+     positive-amount reversing MODIFY instead of another negative
+     MODIFY.
+   - Copy `tax_behavior` in `creditNoteAsInvoice` so inclusive-tax
+     credit notes don't ship the wrong amounts and rate.
+   - Compute `modificationIndex` from prior submissions for the same
+     invoice via `FindByInvoiceNumber`.
+   - Distinguish `pre_payment` vs `post_payment` credit notes for
+     §77 timing.
+   - Add unit tests for each case (none currently exist).
+2. **§58 subsequent-billing (utólagos) support.** Needed before
+   enabling Stripe metered billing (`usage_type=metered`) or any
+   arrears-billed subscription. Adds the +60-day clamp logic to the
+   tax-point computation.
+3. **VAT-status surfacing for non-standard supplies.** Map Stripe Tax's
+   `taxability_reason` onto NAV's `vatExemption` / `vatOutOfScope`
+   blocks for reverse-charge B2B EU and non-EU sales. Currently those
+   collapse to `vatPercentage=0`, which is technically allowed but
+   loses information NAV expects.
+
+**Ergonomics (medium priority):**
+
+4. **`paymentMethod` auto-derivation** from
+   `invoice.collection_method` and
+   `invoice.charge.payment_method_details` so mixed card / bank-
+   transfer flows don't need a manual override per invoice.
+5. **HU `eu_vat` → DOMESTIC fallback.** When a Hungarian buyer
+   provides only `eu_vat HU12345678` (8 digits, no composite), the
+   mapper currently classifies them as OTHER. Investigate whether a
+   NAV taxpayer query can backfill the missing `vatCode`/`countyCode`
+   without forcing the integrator to collect `hu_tin` separately.
+
+**Audit defense (low priority):**
+
+6. **`electronicInvoiceHash` over the Stripe PDF.** Optional under the
+   current `completenessIndicator=false` mode, but adding it gives a
+   stronger audit trail under Hungarian retention rules.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
