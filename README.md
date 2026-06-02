@@ -119,14 +119,16 @@ Implementation details:
   parent CREATE to be `accepted` on NAV's side before submitting.
 - **24-hour deadline**: submissions that miss it transition to `aborted`
   with an error-level log.
-- **§58 continuous-service / subscription billing**: when Stripe's
-  `billing_reason` starts with `subscription_`, the invoice is mapped
-  as a periodic settlement (`periodicalSettlement=true`,
+- **§58 continuous-service / subscription billing**: when the Stripe
+  invoice covers a service period (`period_end > period_start`), it is
+  mapped as a periodic settlement (`periodicalSettlement=true`,
   `invoiceDeliveryPeriodStart/End` from `period_start/period_end`). The
   §58 tax point is set to the invoice issue date, matching the
   *advance-billing* rule — Stripe's default for
   `collection_method=charge_automatically`, where the card is charged on
-  finalization at the start of the cycle.
+  finalization at the start of the cycle. The period-span check is the
+  signal (not `billing_reason`) so that quote-originated subscription
+  invoices (`billing_reason=quote_accept`) are also covered.
 
 ## Configuration
 

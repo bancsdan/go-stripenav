@@ -146,14 +146,17 @@ func MapInvoice(inv *stripe.Invoice, opts MapOptions) (schemas.InvoiceData, erro
 		PaymentMethod:       opts.PaymentMethod,
 		InvoiceAppearance:   opts.InvoiceAppearance,
 	}
-	// §58 continuous-service / periodic settlement. Stripe billing_reason
-	// values starting with "subscription_" cover the cycle/create/update/
-	// threshold cases — all of them have populated period_start/period_end
-	// describing the service window. We're advance-billing the upcoming
-	// period (Stripe's default for charge_automatically), so the §58 tax
-	// point equals the invoice issue date (already in InvoiceDeliveryDate).
-	if strings.HasPrefix(string(inv.BillingReason), "subscription_") &&
-		inv.PeriodStart > 0 && inv.PeriodEnd > 0 {
+	// §58 continuous-service / periodic settlement. The honest signal is
+	// "does this invoice cover a service period?" — i.e. period_end is
+	// strictly greater than period_start. That catches subscription
+	// cycles, quote_accept invoices for subscriptions, and manually
+	// created invoices that explicitly span a period; it correctly skips
+	// one-off invoices where Stripe sets period_start == period_end.
+	// Using billing_reason="subscription_*" alone would miss
+	// quote_accept-originated subscription invoices.
+	// Advance-billed (charge_automatically) → §58 tax point equals the
+	// invoice issue date, already in InvoiceDeliveryDate.
+	if inv.PeriodStart > 0 && inv.PeriodEnd > inv.PeriodStart {
 		detail.InvoiceDeliveryPeriodStart = time.Unix(inv.PeriodStart, 0).UTC().Format("2006-01-02")
 		detail.InvoiceDeliveryPeriodEnd = time.Unix(inv.PeriodEnd, 0).UTC().Format("2006-01-02")
 		t := true

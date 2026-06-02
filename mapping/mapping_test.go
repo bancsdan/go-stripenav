@@ -289,8 +289,11 @@ func TestMapInvoice_OneOffNoPeriodicalSettlement(t *testing.T) {
 	inv := makeInvoice("2026/00011", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
 		huLine("Service", 1_000_000, 270_000),
 	})
-	// One-off / manual invoice: no subscription, no period.
+	// One-off / manual invoice: Stripe sets period_start == period_end
+	// for non-recurring invoices.
 	inv.BillingReason = stripe.InvoiceBillingReasonManual
+	inv.PeriodStart = 1_700_000_000
+	inv.PeriodEnd = 1_700_000_000
 
 	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
 	if err != nil {
@@ -303,6 +306,32 @@ func TestMapInvoice_OneOffNoPeriodicalSettlement(t *testing.T) {
 	if d.InvoiceDeliveryPeriodStart != "" || d.InvoiceDeliveryPeriodEnd != "" {
 		t.Errorf("period fields populated on one-off: start=%q end=%q",
 			d.InvoiceDeliveryPeriodStart, d.InvoiceDeliveryPeriodEnd)
+	}
+}
+
+// TestMapInvoice_QuoteAcceptSubscription covers the case the
+// "subscription_" prefix check would miss: an invoice originated from
+// a quote that produced a subscription. billing_reason is "quote_accept",
+// but it covers a period so §58 applies.
+func TestMapInvoice_QuoteAcceptSubscription(t *testing.T) {
+	inv := makeInvoice("2026/00014", "huf", 1_767_225_600, []*stripe.InvoiceLineItem{
+		huLine("Annual plan", 12_000_000, 3_240_000),
+	})
+	inv.BillingReason = stripe.InvoiceBillingReasonQuoteAccept
+	inv.PeriodStart = 1_767_225_600 // 2026-01-01
+	inv.PeriodEnd = 1_798_761_600   // 2027-01-01 (annual)
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	d := got.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail
+	if d.PeriodicalSettlement == nil || !*d.PeriodicalSettlement {
+		t.Errorf("quote_accept with period span: PeriodicalSettlement = %v, want true",
+			d.PeriodicalSettlement)
+	}
+	if d.InvoiceDeliveryPeriodStart != "2026-01-01" || d.InvoiceDeliveryPeriodEnd != "2027-01-01" {
+		t.Errorf("period: start=%q end=%q", d.InvoiceDeliveryPeriodStart, d.InvoiceDeliveryPeriodEnd)
 	}
 }
 
