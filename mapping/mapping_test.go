@@ -472,6 +472,144 @@ func TestMapInvoice_NetVatGrossReconciles(t *testing.T) {
 	}
 }
 
+// TestMapInvoice_EUReverseChargeCustomer pins the OTHER + community
+// VAT classification for an EU (non-HU) B2B buyer with their EU VAT
+// number, billed at 0% VAT (reverse-charge under HU §37). Documents
+// the current behaviour, including the gap: the line carries a bare
+// vatPercentage=0 instead of a structured vatOutOfScope block with a
+// reason code. Roadmap item #3 tracks the structured representation.
+func TestMapInvoice_EUReverseChargeCustomer(t *testing.T) {
+	inv := makeInvoice("2026/00030", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		{
+			Description: "Consulting (reverse-charge)",
+			Amount:      1_000_000,
+			Quantity:    1,
+			Taxes:       []*stripe.InvoiceLineItemTax{{Amount: 0}},
+		},
+	})
+	inv.CustomerName = "Beispiel Käufer GmbH"
+	inv.CustomerAddress = &stripe.Address{
+		Country:    "DE",
+		PostalCode: "80331",
+		City:       "München",
+		Line1:      "Hauptstraße 17",
+	}
+	euVAT := stripe.TaxIDTypeEUVAT
+	inv.CustomerTaxIDs = []*stripe.InvoiceCustomerTaxID{
+		{Type: &euVAT, Value: "DE123456789"},
+	}
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+
+	cust := got.InvoiceMain.Invoice.InvoiceHead.CustomerInfo
+	if cust == nil {
+		t.Fatalf("CustomerInfo nil")
+	}
+	if cust.CustomerVatStatus != "OTHER" {
+		t.Errorf("CustomerVatStatus = %q, want OTHER", cust.CustomerVatStatus)
+	}
+	if cust.CustomerVatData == nil || cust.CustomerVatData.CommunityVatNumber != "DE123456789" {
+		t.Errorf("CommunityVatNumber = %+v, want DE123456789", cust.CustomerVatData)
+	}
+	// Document the current zero-rate shape so a future change to
+	// vatOutOfScope intentionally breaks this assertion.
+	l := got.InvoiceMain.Invoice.InvoiceLines.Lines[0]
+	if l.LineAmountsNormal.LineVatRate.VatPercentage != "0.00" {
+		t.Errorf("VatPercentage = %q, want 0.00 (current zero-rate shape)",
+			l.LineAmountsNormal.LineVatRate.VatPercentage)
+	}
+	if l.LineAmountsNormal.LineVatRate.VatOutOfScope != nil {
+		t.Errorf("VatOutOfScope is now populated — update the test and remove this guardrail")
+	}
+}
+
+// TestMapInvoice_FatPayload feeds the mapper a representative Stripe
+// invoice with many of the real-world fields populated (customer
+// shipping, account fields, automatic_tax, period_start/end, full
+// status_transitions, multi-line with proration shape) — and asserts
+// the mapper produces a coherent InvoiceData without error. This is a
+// shape regression test: if Stripe changes a field name or Go's
+// json.Unmarshal becomes stricter, this catches it.
+func TestMapInvoice_FatPayload(t *testing.T) {
+	finalized := int64(1_780_428_400)
+	periodStart := int64(1_780_000_000)
+	periodEnd := int64(1_782_000_000)
+	euVAT := stripe.TaxIDTypeEUVAT
+
+	inv := &stripe.Invoice{
+		ID:            "in_FAT01",
+		Number:        "2026/00031",
+		Currency:      "huf",
+		Status:        stripe.InvoiceStatusOpen,
+		BillingReason: stripe.InvoiceBillingReasonSubscriptionCycle,
+		Created:       finalized - 60,
+		EffectiveAt:   finalized,
+		PeriodStart:   periodStart,
+		PeriodEnd:     periodEnd,
+		StatusTransitions: &stripe.InvoiceStatusTransitions{
+			FinalizedAt: finalized,
+		},
+		CustomerName:  "Példa Vevő Kft.",
+		CustomerEmail: "szamla@peldavevo.hu",
+		CustomerAddress: &stripe.Address{
+			Country:    "HU",
+			PostalCode: "1011",
+			City:       "Budapest",
+			Line1:      "Fő utca 1.",
+		},
+		CustomerTaxIDs: []*stripe.InvoiceCustomerTaxID{
+			{Type: &euVAT, Value: "HU12345678"},
+		},
+		Lines: &stripe.InvoiceLineItemList{
+			Data: []*stripe.InvoiceLineItem{
+				{
+					Description: "Monthly subscription",
+					Amount:      1_000_000,
+					Quantity:    1,
+					Taxes: []*stripe.InvoiceLineItemTax{
+						{Amount: 270_000, TaxBehavior: "exclusive"},
+					},
+				},
+				{
+					Description: "Mid-cycle proration",
+					Amount:      150_000,
+					Quantity:    1,
+					Taxes: []*stripe.InvoiceLineItemTax{
+						{Amount: 40_500, TaxBehavior: "exclusive"},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice on fat payload: %v", err)
+	}
+	if got.InvoiceNumber != "2026/00031" {
+		t.Errorf("InvoiceNumber = %q", got.InvoiceNumber)
+	}
+	if len(got.InvoiceMain.Invoice.InvoiceLines.Lines) != 2 {
+		t.Errorf("expected 2 lines, got %d", len(got.InvoiceMain.Invoice.InvoiceLines.Lines))
+	}
+	// Subscription + period span → §58 fields populated.
+	d := got.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail
+	if d.PeriodicalSettlement == nil || !*d.PeriodicalSettlement {
+		t.Errorf("expected PeriodicalSettlement=true on fat subscription payload")
+	}
+	if d.InvoiceDeliveryPeriodStart == "" || d.InvoiceDeliveryPeriodEnd == "" {
+		t.Errorf("expected delivery period dates: start=%q end=%q",
+			d.InvoiceDeliveryPeriodStart, d.InvoiceDeliveryPeriodEnd)
+	}
+	// XML marshalling shouldn't trip on any of the fat shapes.
+	if _, err := xml.Marshal(got); err != nil {
+		t.Errorf("xml.Marshal: %v", err)
+	}
+}
+
 func TestMapInvoice_MarshalsToXML(t *testing.T) {
 	inv := makeInvoice("2026/00008", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
 		huLine("Service", 1_000_000, 270_000),

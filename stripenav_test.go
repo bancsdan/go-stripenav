@@ -268,6 +268,172 @@ func TestHandler_FinalizedInvoiceSubmitsAndStores(t *testing.T) {
 	}
 }
 
+// TestHandler_FatPayloadDecodesAndMaps drives a Stripe-shaped event
+// with the rich field set a real Stripe Tax payload carries —
+// account_*, automatic_tax, customer_*, lines with parent/pricing/
+// taxes (TaxBehavior), period_*, status_transitions, totals — through
+// the handler. Ensures decodeInvoice doesn't choke on unfamiliar
+// fields (json.Unmarshal silently drops unknown keys, but a renamed
+// or restructured known field would break us) and that the resulting
+// submission lands in StatusAccepted.
+func TestHandler_FatPayloadDecodesAndMaps(t *testing.T) {
+	fake := &fakeNAVClient{
+		submitFn: func(_ context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
+			if len(ops) != 1 || ops[0].Operation != "CREATE" {
+				return nav.SubmitResult{}, fmt.Errorf("unexpected ops: %+v", ops)
+			}
+			return nav.SubmitResult{TransactionID: "T-FAT"}, nil
+		},
+	}
+	h, cfg := handlerWithFake(t, fake)
+
+	now := time.Now()
+	finalized := now.Add(-time.Minute).Unix()
+	periodStart := now.Add(-30 * 24 * time.Hour).Unix()
+	periodEnd := now.Unix()
+
+	inv := map[string]any{
+		// Top-level invoice fields a real Stripe Tax invoice carries.
+		"id":                    "in_FAT01",
+		"object":                "invoice",
+		"number":                "2026-FAT",
+		"currency":              "huf",
+		"status":                "open",
+		"livemode":              false,
+		"account_country":       "HU",
+		"account_name":          "Bancsi Daniel E.V.",
+		"account_tax_ids":       []string{"txi_FAKE"},
+		"amount_due":            1_270_000,
+		"amount_paid":           0,
+		"amount_remaining":      1_270_000,
+		"amount_shipping":       0,
+		"application":           nil,
+		"attempt_count":         0,
+		"attempted":             false,
+		"auto_advance":          false,
+		"automatic_tax":         map[string]any{"enabled": true, "status": "complete", "provider": "stripe", "liability": map[string]any{"type": "self"}},
+		"billing_reason":        "subscription_cycle",
+		"collection_method":     "charge_automatically",
+		"created":               finalized - 60,
+		"custom_fields":         nil,
+		"customer":              "cus_FAT01",
+		"customer_email":        "fat@example.hu",
+		"customer_name":         "Fat Payload Kft.",
+		"customer_phone":        nil,
+		"customer_shipping":     nil,
+		"customer_tax_exempt":   "none",
+		"customer_address": map[string]any{
+			"city":        "Budapest",
+			"country":     "HU",
+			"line1":       "Fő utca 1.",
+			"line2":       nil,
+			"postal_code": "1011",
+			"state":       nil,
+		},
+		"customer_tax_ids": []map[string]any{
+			{"type": "hu_tin", "value": "12345678-1-23"},
+		},
+		"default_payment_method": nil,
+		"default_source":         nil,
+		"default_tax_rates":      []any{},
+		"description":            "Created by fat-payload test",
+		"discounts":              []any{},
+		"due_date":               nil,
+		"effective_at":           finalized,
+		"ending_balance":         0,
+		"footer":                 nil,
+		"from_invoice":           nil,
+		"hosted_invoice_url":     "https://example/invoice/FAT01",
+		"invoice_pdf":            "https://example/invoice/FAT01.pdf",
+		"issuer":                 map[string]any{"type": "self"},
+		"latest_revision":        nil,
+		"metadata":               map[string]any{"source": "fat-payload-test"},
+		"next_payment_attempt":   nil,
+		"on_behalf_of":           nil,
+		"parent":                 nil,
+		"payment_settings":       map[string]any{"payment_method_options": nil, "payment_method_types": nil},
+		"period_start":           periodStart,
+		"period_end":             periodEnd,
+		"rendering":              map[string]any{"pdf": map[string]any{"page_size": "letter"}},
+		"shipping_cost":          nil,
+		"shipping_details":       nil,
+		"starting_balance":       0,
+		"statement_descriptor":   nil,
+		"status_transitions": map[string]any{
+			"finalized_at":            finalized,
+			"marked_uncollectible_at": nil,
+			"paid_at":                 nil,
+			"voided_at":               nil,
+		},
+		"subtotal":               1_000_000,
+		"subtotal_excluding_tax": 1_000_000,
+		"test_clock":             nil,
+		"total":                  1_270_000,
+		"total_discount_amounts": []any{},
+		"total_excluding_tax":    1_000_000,
+		"webhooks_delivered_at":  nil,
+		"lines": map[string]any{
+			"data": []map[string]any{
+				{
+					"id":           "il_FAT01",
+					"object":       "line_item",
+					"description":  "Monthly subscription",
+					"amount":       1_000_000,
+					"currency":     "huf",
+					"discountable": true,
+					"discounts":    []any{},
+					"livemode":     false,
+					"metadata":     map[string]any{},
+					"parent": map[string]any{
+						"type": "subscription_item_details",
+						"subscription_item_details": map[string]any{
+							"subscription":      "sub_FAT01",
+							"subscription_item": "si_FAT01",
+							"proration":         false,
+						},
+					},
+					"period":   map[string]any{"start": periodStart, "end": periodEnd},
+					"pricing":  map[string]any{"type": "price_details", "price_details": map[string]any{"price": "price_FAT", "product": "prod_FAT"}, "unit_amount_decimal": "1000000"},
+					"quantity": 1,
+					"subtotal": 1_000_000,
+					"taxes": []map[string]any{
+						{
+							"amount":            270_000,
+							"tax_behavior":      "exclusive",
+							"taxability_reason": "standard_rated",
+							"taxable_amount":    1_000_000,
+							"type":              "tax_rate_details",
+							"tax_rate_details":  map[string]any{"tax_rate": "txr_FAT"},
+						},
+					},
+				},
+			},
+			"has_more":    false,
+			"object":      "list",
+			"total_count": 1,
+		},
+	}
+
+	payload := marshalEvent(t, "evt_FAT01", "invoice.finalized", inv)
+	sig := signStripeWebhook(payload, cfg.StripeWebhookSecret, now)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	req.Header.Set("Stripe-Signature", sig)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body)
+	}
+	tickOnce(t, cfg.Store, fake)
+	got, err := cfg.Store.Get(context.Background(), "evt_FAT01")
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Status != stripenav.StatusAccepted || got.TransactionID != "T-FAT" {
+		t.Fatalf("submission state: %+v", got)
+	}
+}
+
 func TestHandler_Dedup(t *testing.T) {
 	calls := 0
 	fake := &fakeNAVClient{

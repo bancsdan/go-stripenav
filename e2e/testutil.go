@@ -118,10 +118,17 @@ func loadEnv(t *testing.T) e2eEnv {
 	}
 }
 
+// harnessOpts overrides defaults on the bridge under test. Currently the
+// only knob is the exchange-rate provider, needed for non-HUF invoices.
+type harnessOpts struct {
+	ExchangeRate func(ctx context.Context, currency string, at time.Time) (string, error)
+}
+
 // newHarness wires a real bridge: in-memory store, real nav.Client
 // against the test endpoint, worker enabled. The returned cleanup
-// shuts the handler down.
-func newHarness(t *testing.T, env e2eEnv) (*stripenav.BridgeHandler, *storeinmem.Store, func()) {
+// shuts the handler down. Pass a harnessOpts with ExchangeRate set
+// for non-HUF invoices.
+func newHarness(t *testing.T, env e2eEnv, opts ...harnessOpts) (*stripenav.BridgeHandler, *storeinmem.Store, func()) {
 	t.Helper()
 	store := storeinmem.New()
 	cfg := stripenav.Config{
@@ -132,6 +139,11 @@ func newHarness(t *testing.T, env e2eEnv) (*stripenav.BridgeHandler, *storeinmem
 		// Tighten pacing so tests don't sit waiting on the default 10s sleep.
 		WorkerMaxSleep:     500 * time.Millisecond,
 		WorkerPollInterval: 2 * time.Second,
+	}
+	for _, o := range opts {
+		if o.ExchangeRate != nil {
+			cfg.ExchangeRateProvider = o.ExchangeRate
+		}
 	}
 	h, err := stripenav.Handler(cfg)
 	if err != nil {
@@ -169,21 +181,30 @@ func postSignedEvent(t *testing.T, h http.Handler, body []byte) *httptest.Respon
 type invoiceEventOpts struct {
 	EventID       string
 	InvoiceNumber string
-	// NetAmountFt is the line's net amount in HUF fillér (×100). 27%
-	// VAT is computed on top. For InclusiveTax=true, the line's
-	// Stripe `amount` field carries the gross (net + vat) instead of
-	// the net — matching what Stripe Tax emits with
-	// tax_behavior=inclusive.
+	// NetAmountFt is the line's net amount in Stripe minor units (×100
+	// for HUF, USD, EUR; ×1 for zero-decimal currencies like JPY). 27%
+	// VAT is computed on top by default. Ignored when Lines is set.
 	NetAmountFt int64
+
+	// Currency is the lowercased ISO code (huf, usd, eur, …). Default
+	// "huf". For non-HUF, the harness must be created with an
+	// ExchangeRate provider via harnessOpts.
+	Currency string
+
+	// Lines, when non-empty, overrides the single-line shortcut. Each
+	// entry produces one line in the Stripe payload with the given
+	// net amount and VAT rate. Useful for multi-rate and mixed-line
+	// scenarios.
+	Lines []invoiceLineOpts
 
 	// Type defaults to "invoice.finalized". Also supports
 	// "invoice.voided" — flips status to "void" and populates
 	// voided_at, which the bridge routes to a STORNO submission.
 	Type string
 
-	// InclusiveTax sets the line's tax_behavior to "inclusive" and
-	// adjusts the `amount` to be gross. Pairs with the
-	// inclusive-tax mapping path.
+	// InclusiveTax sets the single shortcut line's tax_behavior to
+	// "inclusive" (line `amount` becomes gross). Ignored when Lines
+	// is set; per-line Inclusive on invoiceLineOpts wins there.
 	InclusiveTax bool
 
 	// Subscription sets billing_reason=subscription_cycle and the
@@ -202,6 +223,22 @@ type invoiceEventOpts struct {
 	CustomerTaxIDs  []map[string]string
 }
 
+// invoiceLineOpts shapes a single Stripe invoice line for multi-line
+// scenarios.
+type invoiceLineOpts struct {
+	Description string
+	// NetAmount is the net in Stripe minor units (×100 for most
+	// currencies, ×1 for zero-decimal). When Inclusive=true the
+	// line's emitted `amount` field is NetAmount+VAT (gross).
+	NetAmount int64
+	// VatRatePct expressed as integer percent (27 → 27%, 5 → 5%,
+	// 0 → no VAT). 27 is the default if zero AND VatRateSet=false.
+	VatRatePct    int
+	VatRatePctSet bool
+	Quantity      int64
+	Inclusive     bool
+}
+
 // buildInvoiceEvent returns a Stripe-shaped event body for the
 // configured invoice. invoiceNumber must be unique per NAV supplier —
 // NAV rejects duplicates with INVOICE_NUMBER_NOT_UNIQUE.
@@ -210,13 +247,54 @@ func buildInvoiceEvent(t *testing.T, opts invoiceEventOpts) []byte {
 	if opts.Type == "" {
 		opts.Type = "invoice.finalized"
 	}
+	if opts.Currency == "" {
+		opts.Currency = "huf"
+	}
 
-	vat := opts.NetAmountFt * 27 / 100
-	lineAmount := opts.NetAmountFt
-	taxEntry := map[string]any{"amount": vat}
-	if opts.InclusiveTax {
-		lineAmount = opts.NetAmountFt + vat // amount carries the gross
-		taxEntry["tax_behavior"] = "inclusive"
+	lineData := []map[string]any{}
+	if len(opts.Lines) == 0 {
+		// Single-line shortcut from NetAmountFt at 27% VAT.
+		vat := opts.NetAmountFt * 27 / 100
+		amount := opts.NetAmountFt
+		taxEntry := map[string]any{"amount": vat}
+		if opts.InclusiveTax {
+			amount = opts.NetAmountFt + vat
+			taxEntry["tax_behavior"] = "inclusive"
+		}
+		lineData = append(lineData, map[string]any{
+			"description": "E2E harness line",
+			"amount":      amount,
+			"quantity":    1,
+			"taxes":       []map[string]any{taxEntry},
+		})
+	} else {
+		for i, l := range opts.Lines {
+			pct := l.VatRatePct
+			if !l.VatRatePctSet && pct == 0 {
+				pct = 27 // sensible default; explicit 0 must set VatRatePctSet=true
+			}
+			vat := l.NetAmount * int64(pct) / 100
+			amount := l.NetAmount
+			taxEntry := map[string]any{"amount": vat}
+			if l.Inclusive {
+				amount = l.NetAmount + vat
+				taxEntry["tax_behavior"] = "inclusive"
+			}
+			desc := l.Description
+			if desc == "" {
+				desc = fmt.Sprintf("Line %d", i+1)
+			}
+			qty := l.Quantity
+			if qty == 0 {
+				qty = 1
+			}
+			lineData = append(lineData, map[string]any{
+				"description": desc,
+				"amount":      amount,
+				"quantity":    qty,
+				"taxes":       []map[string]any{taxEntry},
+			})
+		}
 	}
 
 	st := map[string]any{
@@ -232,19 +310,10 @@ func buildInvoiceEvent(t *testing.T, opts invoiceEventOpts) []byte {
 		"id":                 "in_" + opts.InvoiceNumber,
 		"object":             "invoice",
 		"number":             opts.InvoiceNumber,
-		"currency":           "huf",
+		"currency":           opts.Currency,
 		"status":             status,
 		"status_transitions": st,
-		"lines": map[string]any{
-			"data": []map[string]any{
-				{
-					"description": "E2E harness line",
-					"amount":      lineAmount,
-					"quantity":    1,
-					"taxes":       []map[string]any{taxEntry},
-				},
-			},
-		},
+		"lines":              map[string]any{"data": lineData},
 	}
 
 	if opts.Subscription {

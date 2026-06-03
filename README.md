@@ -319,6 +319,15 @@ One scenario per file:
   shape Stripe Tax emits for B2C pricing).
 - `domestic_customer_test.go` — Hungarian buyer with `hu_tin` →
   DOMESTIC classification + split `customerTaxNumber`.
+- `eu_reverse_charge_test.go` — German B2B buyer with `eu_vat`, 0%
+  VAT line. Confirms NAV accepts the bare zero-rate shape today
+  (the `vatOutOfScope` block is still a roadmap item).
+- `mixed_vat_rates_test.go` — two lines at 27% + 5%. Exercises the
+  per-rate `summaryByVatRate` bucketing and cross-bucket
+  reconciliation against the invoice totals.
+- `foreign_currency_test.go` — USD invoice with a stub
+  `ExchangeRateProvider`. Validates the foreign-currency + HUF
+  summary shape.
 - `invoice_voided_test.go` — finalize → wait for NAV accept → void →
   STORNO with the worker's parent-dependency tracking.
 
