@@ -163,38 +163,124 @@ func postSignedEvent(t *testing.T, h http.Handler, body []byte) *httptest.Respon
 	return rec
 }
 
-// buildInvoiceFinalizedEvent returns a Stripe-shaped invoice.finalized
-// event body. invoiceNumber must be unique per NAV supplier — NAV
-// rejects duplicates with INVOICE_NUMBER_NOT_UNIQUE. netAmountFt is the
-// line subtotal before VAT (matches Stripe's invoice.lines[].amount
-// semantics); 27% Hungarian standard VAT is added on top.
-func buildInvoiceFinalizedEvent(t *testing.T, eventID, invoiceNumber string, netAmountFt int64) []byte {
+// invoiceEventOpts configures buildInvoiceEvent. Zero-valued fields fall
+// back to the simplest realistic shape (HUF, exclusive 27% VAT, no
+// customer info, finalized event).
+type invoiceEventOpts struct {
+	EventID       string
+	InvoiceNumber string
+	// NetAmountFt is the line's net amount in HUF fillér (×100). 27%
+	// VAT is computed on top. For InclusiveTax=true, the line's
+	// Stripe `amount` field carries the gross (net + vat) instead of
+	// the net — matching what Stripe Tax emits with
+	// tax_behavior=inclusive.
+	NetAmountFt int64
+
+	// Type defaults to "invoice.finalized". Also supports
+	// "invoice.voided" — flips status to "void" and populates
+	// voided_at, which the bridge routes to a STORNO submission.
+	Type string
+
+	// InclusiveTax sets the line's tax_behavior to "inclusive" and
+	// adjusts the `amount` to be gross. Pairs with the
+	// inclusive-tax mapping path.
+	InclusiveTax bool
+
+	// Subscription sets billing_reason=subscription_cycle and the
+	// period_start/period_end fields, triggering the §58 periodic
+	// settlement branch in the mapper.
+	Subscription bool
+	PeriodStart  time.Time
+	PeriodEnd    time.Time
+
+	// Customer fields. Each one is omitted from the JSON when zero.
+	// CustomerTaxIDs entries look like {"type": "hu_tin", "value":
+	// "12345678-1-23"}.
+	CustomerName    string
+	CustomerEmail   string
+	CustomerAddress map[string]string
+	CustomerTaxIDs  []map[string]string
+}
+
+// buildInvoiceEvent returns a Stripe-shaped event body for the
+// configured invoice. invoiceNumber must be unique per NAV supplier —
+// NAV rejects duplicates with INVOICE_NUMBER_NOT_UNIQUE.
+func buildInvoiceEvent(t *testing.T, opts invoiceEventOpts) []byte {
 	t.Helper()
-	tax := netAmountFt * 27 / 100 // 27% VAT on net
+	if opts.Type == "" {
+		opts.Type = "invoice.finalized"
+	}
+
+	vat := opts.NetAmountFt * 27 / 100
+	lineAmount := opts.NetAmountFt
+	taxEntry := map[string]any{"amount": vat}
+	if opts.InclusiveTax {
+		lineAmount = opts.NetAmountFt + vat // amount carries the gross
+		taxEntry["tax_behavior"] = "inclusive"
+	}
+
+	st := map[string]any{
+		"finalized_at": time.Now().Add(-time.Minute).Unix(),
+	}
+	status := "open"
+	if opts.Type == "invoice.voided" {
+		status = "void"
+		st["voided_at"] = time.Now().Unix()
+	}
+
 	inv := map[string]any{
-		"id":       "in_" + invoiceNumber,
-		"object":   "invoice",
-		"number":   invoiceNumber,
-		"currency": "huf",
-		"status":   "open",
-		"status_transitions": map[string]any{
-			"finalized_at": time.Now().Add(-time.Minute).Unix(),
-		},
+		"id":                 "in_" + opts.InvoiceNumber,
+		"object":             "invoice",
+		"number":             opts.InvoiceNumber,
+		"currency":           "huf",
+		"status":             status,
+		"status_transitions": st,
 		"lines": map[string]any{
 			"data": []map[string]any{
 				{
 					"description": "E2E harness line",
-					"amount":      netAmountFt,
+					"amount":      lineAmount,
 					"quantity":    1,
-					"taxes":       []map[string]any{{"amount": tax}},
+					"taxes":       []map[string]any{taxEntry},
 				},
 			},
 		},
 	}
+
+	if opts.Subscription {
+		inv["billing_reason"] = "subscription_cycle"
+		inv["period_start"] = opts.PeriodStart.Unix()
+		inv["period_end"] = opts.PeriodEnd.Unix()
+	}
+	if opts.CustomerName != "" {
+		inv["customer_name"] = opts.CustomerName
+	}
+	if opts.CustomerEmail != "" {
+		inv["customer_email"] = opts.CustomerEmail
+	}
+	if len(opts.CustomerAddress) > 0 {
+		addr := make(map[string]any, len(opts.CustomerAddress))
+		for k, v := range opts.CustomerAddress {
+			addr[k] = v
+		}
+		inv["customer_address"] = addr
+	}
+	if len(opts.CustomerTaxIDs) > 0 {
+		tids := make([]map[string]any, 0, len(opts.CustomerTaxIDs))
+		for _, ti := range opts.CustomerTaxIDs {
+			entry := make(map[string]any, len(ti))
+			for k, v := range ti {
+				entry[k] = v
+			}
+			tids = append(tids, entry)
+		}
+		inv["customer_tax_ids"] = tids
+	}
+
 	event := map[string]any{
-		"id":      eventID,
+		"id":      opts.EventID,
 		"object":  "event",
-		"type":    "invoice.finalized",
+		"type":    opts.Type,
 		"created": time.Now().Unix(),
 		"data":    map[string]any{"object": inv},
 	}

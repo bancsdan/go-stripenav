@@ -307,9 +307,20 @@ task test:race    # with -race
 
 End-to-end tests against `api-test.onlineszamla.nav.gov.hu` live in the
 `e2e/` package and are gated behind the `navtest` build tag, so normal
-`go test ./...` never touches NAV. The harness signs a Stripe payload,
+`go test ./...` never touches NAV. Each test signs a Stripe payload,
 posts it to a real `BridgeHandler`, waits for the background worker to
 reach `accepted`, and asserts that NAV returned a transaction id.
+One scenario per file:
+
+- `invoice_finalized_test.go` — baseline HUF invoice → NAV CREATE.
+- `subscription_invoice_test.go` — §58 periodic-settlement invoice
+  with `periodicalSettlement=true` + delivery period dates.
+- `inclusive_tax_test.go` — line with `tax_behavior=inclusive` (the
+  shape Stripe Tax emits for B2C pricing).
+- `domestic_customer_test.go` — Hungarian buyer with `hu_tin` →
+  DOMESTIC classification + split `customerTaxNumber`.
+- `invoice_voided_test.go` — finalize → wait for NAV accept → void →
+  STORNO with the worker's parent-dependency tracking.
 
 To run locally:
 
