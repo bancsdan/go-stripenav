@@ -115,7 +115,18 @@ Implementation details:
 - **Multi-replica safe**: rows are claimed via
   `SELECT … FOR UPDATE SKIP LOCKED` with a TTL lease, so multiple
   replicas process disjoint work and crashed claims are recovered
-  automatically.
+  automatically. If lease renewal fails mid-flight (the claim was
+  stolen, the store dropped the row, etc.) the lifecycle goroutine
+  aborts immediately rather than continuing to write under a stale
+  claim.
+- **Hungarian calendar dates**: every date field submitted to NAV
+  (`invoiceIssueDate`, `invoiceDeliveryDate`, `paymentDate`, the
+  `invoiceDeliveryPeriodStart/End` pair) is rendered in a fixed UTC+2
+  zone — CEST. This matches Hungarian local time for ~7 months/year
+  and drifts by an hour during CET (late October through late March),
+  producing at most a one-day shift for invoices finalized in the
+  23:00–00:00 UTC window. The trade-off — fixed offset versus a real
+  tzdata lookup — keeps the binary self-contained.
 - **Parent dependency tracking**: a STORNO submission waits for its
   parent CREATE to be `accepted` on NAV's side before submitting.
 - **24-hour deadline**: submissions that miss it transition to `aborted`

@@ -11,6 +11,25 @@ import (
 	"github.com/stripe/stripe-go/v82"
 )
 
+// hungaryZone is a fixed UTC+2 offset, used to render the calendar
+// date NAV expects on Hungarian invoice fields. We use a fixed offset
+// rather than time.LoadLocation("Europe/Budapest") to sidestep the
+// tzdata dependency at build/runtime. Trade-off: UTC+2 matches CEST
+// exactly (~7 months/year); during CET (~5 months/year, late October
+// through late March) Hungary is actually UTC+1, so timestamps in the
+// 22:00–23:00 UTC window will render one calendar day ahead of the
+// real Hungarian date. Acceptable for this library because the
+// alternative (tzdata) imposes deployment complexity that outweighs
+// the narrow DST-shoulder window.
+var hungaryZone = time.FixedZone("Hungary", 2*60*60)
+
+// localDate formats t as yyyy-MM-dd in the Hungarian calendar (UTC+2).
+// All date-only fields submitted to NAV go through this so the rendered
+// date matches what the supplier (and customer) see on the invoice.
+func localDate(t time.Time) string {
+	return t.In(hungaryZone).Format("2006-01-02")
+}
+
 // Operation is the NAV invoice operation produced by the mapper.
 type Operation string
 
@@ -140,7 +159,7 @@ func MapInvoice(inv *stripe.Invoice, opts MapOptions) (schemas.InvoiceData, erro
 
 	detail := schemas.InvoiceDetail{
 		InvoiceCategory:     "NORMAL",
-		InvoiceDeliveryDate: issued.Format("2006-01-02"),
+		InvoiceDeliveryDate: localDate(issued),
 		CurrencyCode:        currency,
 		ExchangeRate:        rate.FloatString(6),
 		PaymentMethod:       opts.PaymentMethod,
@@ -157,25 +176,25 @@ func MapInvoice(inv *stripe.Invoice, opts MapOptions) (schemas.InvoiceData, erro
 	// Advance-billed (charge_automatically) → §58 tax point equals the
 	// invoice issue date, already in InvoiceDeliveryDate.
 	if inv.PeriodStart > 0 && inv.PeriodEnd > inv.PeriodStart {
-		detail.InvoiceDeliveryPeriodStart = time.Unix(inv.PeriodStart, 0).UTC().Format("2006-01-02")
-		detail.InvoiceDeliveryPeriodEnd = time.Unix(inv.PeriodEnd, 0).UTC().Format("2006-01-02")
+		detail.InvoiceDeliveryPeriodStart = localDate(time.Unix(inv.PeriodStart, 0))
+		detail.InvoiceDeliveryPeriodEnd = localDate(time.Unix(inv.PeriodEnd, 0))
 		t := true
 		detail.PeriodicalSettlement = &t
 	}
 	switch {
 	case inv.DueDate > 0:
-		detail.PaymentDate = time.Unix(inv.DueDate, 0).UTC().Format("2006-01-02")
+		detail.PaymentDate = localDate(time.Unix(inv.DueDate, 0))
 	case detail.PaymentMethod == "CARD":
 		// charge_automatically card flows have no due_date — the card is
 		// charged on finalization, so payment date = issue date.
-		detail.PaymentDate = issued.Format("2006-01-02")
+		detail.PaymentDate = localDate(issued)
 	}
 
 	summary := buildSummary(byRate, totals, currency)
 
 	out := schemas.InvoiceData{
 		InvoiceNumber:         inv.Number,
-		InvoiceIssueDate:      issued.Format("2006-01-02"),
+		InvoiceIssueDate:      localDate(issued),
 		CompletenessIndicator: false,
 		InvoiceMain: schemas.InvoiceMain{
 			Invoice: schemas.Invoice{

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stripe/stripe-go/v82"
 )
@@ -607,6 +608,51 @@ func TestMapInvoice_FatPayload(t *testing.T) {
 	// XML marshalling shouldn't trip on any of the fat shapes.
 	if _, err := xml.Marshal(got); err != nil {
 		t.Errorf("xml.Marshal: %v", err)
+	}
+}
+
+// TestLocalDate_CESTBoundary pins the Hungarian calendar-date
+// rendering. A Stripe timestamp at 22:30 UTC on 5 June lands at 00:30
+// in Hungary (CEST = UTC+2) on 6 June. Using bare UTC formatting
+// would render "2026-06-05" — wrong by one day. localDate must
+// render "2026-06-06".
+func TestLocalDate_CESTBoundary(t *testing.T) {
+	// 22:30 UTC on 5 June 2026 ≙ 00:30 CEST on 6 June 2026.
+	t1 := time.Date(2026, time.June, 5, 22, 30, 0, 0, time.UTC)
+	if got := localDate(t1); got != "2026-06-06" {
+		t.Errorf("CEST boundary: localDate(%s) = %q, want 2026-06-06",
+			t1.Format(time.RFC3339), got)
+	}
+	// Midday UTC should render the same calendar date as midday HU.
+	t2 := time.Date(2026, time.June, 5, 12, 0, 0, 0, time.UTC)
+	if got := localDate(t2); got != "2026-06-05" {
+		t.Errorf("midday: localDate(%s) = %q, want 2026-06-05",
+			t2.Format(time.RFC3339), got)
+	}
+}
+
+// TestMapInvoice_BoundaryDateUsesHungarianCalendar end-to-ends the
+// boundary case through MapInvoice: a stripe.Invoice finalized at
+// 22:30 UTC must produce a NAV invoiceIssueDate / invoiceDeliveryDate
+// matching the Hungarian calendar (next day), not the UTC date.
+func TestMapInvoice_BoundaryDateUsesHungarianCalendar(t *testing.T) {
+	// FinalizedAt = 22:30 UTC on 5 June 2026.
+	finalized := time.Date(2026, time.June, 5, 22, 30, 0, 0, time.UTC).Unix()
+	inv := makeInvoice("2026/00040", "huf", finalized, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	if got.InvoiceIssueDate != "2026-06-06" {
+		t.Errorf("InvoiceIssueDate = %q, want 2026-06-06 (HU calendar)",
+			got.InvoiceIssueDate)
+	}
+	if got.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail.InvoiceDeliveryDate != "2026-06-06" {
+		t.Errorf("InvoiceDeliveryDate = %q, want 2026-06-06 (HU calendar)",
+			got.InvoiceMain.Invoice.InvoiceHead.InvoiceDetail.InvoiceDeliveryDate)
 	}
 }
 
