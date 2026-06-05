@@ -271,14 +271,6 @@ func (w *Worker) claimAndProcess(ctx context.Context, wg *sync.WaitGroup) error 
 // cancelled. The next ClaimBatch invocation picks up rows whose
 // NextAttemptAt has come back due.
 func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
-	defer func() {
-		// Best-effort release using a fresh context — even on shutdown
-		// we want to clear the claim so another replica can pick up.
-		relCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = w.store.ReleaseClaim(relCtx, initial.EventID, w.claimerID)
-	}()
-
 	// leaseCtx is cancelled both by parent ctx cancellation (shutdown)
 	// AND by renewLease when it detects we've lost the claim (another
 	// replica stole it, the row was deleted, the store is down). Using
@@ -287,8 +279,26 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 	// without this the lifecycle would happily UpdateStatus and submit
 	// to NAV under a stale claim, causing duplicate work.
 	leaseCtx, cancelLease := context.WithCancel(ctx)
-	defer cancelLease()
-	go w.renewLease(leaseCtx, initial.EventID, cancelLease)
+	var renewDone sync.WaitGroup
+	renewDone.Add(1)
+	go func() {
+		defer renewDone.Done()
+		w.renewLease(leaseCtx, initial.EventID, cancelLease)
+	}()
+	defer func() {
+		// Order matters: cancel leaseCtx first so renewLease sees the
+		// signal and exits, wait for it to fully exit, THEN release
+		// the claim. Without the Wait, ReleaseClaim can race with an
+		// in-flight RenewClaim from a still-running renew goroutine
+		// — RenewClaim would see ClaimedBy="" and log a spurious
+		// "lease renewal failed; claim lost" warning even though the
+		// row is just being released cleanly.
+		cancelLease()
+		renewDone.Wait()
+		relCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = w.store.ReleaseClaim(relCtx, initial.EventID, w.claimerID)
+	}()
 
 	sub := initial
 	for {
