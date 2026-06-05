@@ -18,7 +18,9 @@
 //
 //	NAV_BASE_URL          (default: nav.TestBaseURL)
 //	SUPPLIER_COUNTRY      (default: HU)
-//	E2E_ACCEPT_TIMEOUT    (default: 90s — max wait for a submission to reach accepted)
+//	E2E_ACCEPT_TIMEOUT    (default: 150s — max wait for a submission to reach accepted;
+//	                       NAV's test env can sit in PROCESSING for a minute-plus during
+//	                       load spikes, so the default is intentionally generous)
 package e2e
 
 import (
@@ -79,7 +81,7 @@ func loadEnv(t *testing.T) e2eEnv {
 	if country == "" {
 		country = "HU"
 	}
-	timeout := 90 * time.Second
+	timeout := 150 * time.Second
 	if v := os.Getenv("E2E_ACCEPT_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			timeout = d

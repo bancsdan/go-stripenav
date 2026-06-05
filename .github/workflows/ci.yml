@@ -42,6 +42,12 @@ jobs:
           cache: true
 
       - name: E2E
+        # Per-submission AcceptTimeout in the harness defaults to 150s;
+        # E2E_ACCEPT_TIMEOUT overrides it. NAV's test environment can
+        # sit in PROCESSING for minutes during load spikes, so the CI
+        # ceiling is generous. 30m wall-time on the go test command
+        # gives headroom for the 8-test suite at the worst case
+        # without masking a real hang.
         env:
           NAV_BASE_URL: ${{ secrets.NAV_BASE_URL }}
           NAV_LOGIN: ${{ secrets.NAV_LOGIN }}
@@ -55,4 +61,5 @@ jobs:
           SUPPLIER_POSTAL_CODE: ${{ secrets.SUPPLIER_POSTAL_CODE }}
           SUPPLIER_CITY: ${{ secrets.SUPPLIER_CITY }}
           SUPPLIER_ADDRESS: ${{ secrets.SUPPLIER_ADDRESS }}
-        run: go test -tags=navtest -count=1 -v ./e2e/... -timeout=180s
+          E2E_ACCEPT_TIMEOUT: 180s
+        run: go test -tags=navtest -count=1 -v ./e2e/... -timeout=1800s
