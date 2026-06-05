@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bancsdan/go-stripenav/internal/invoicemap"
+	"github.com/bancsdan/go-stripenav/internal/navclient"
 	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
 	stripe "github.com/stripe/stripe-go/v82"
@@ -82,7 +84,7 @@ type Config struct {
 
 	// navClient is an injection seam for unit tests. Production callers
 	// never set this directly; the Handler constructor builds a real
-	// *nav.Client from the NAV config. Tests in this package can poke at
+	// *navclient.Client from the NAV config. Tests in this package can poke at
 	// it via the package-private surface, and external test code should
 	// reach for WithNAVClient instead.
 	navClient NAVClient
@@ -125,7 +127,7 @@ func Handler(cfg Config, opts ...Option) (*BridgeHandler, error) {
 		return nil, err
 	}
 	if cfg.navClient == nil {
-		client, err := nav.NewClient(cfg.NAV)
+		client, err := navclient.NewClient(cfg.NAV)
 		if err != nil {
 			return nil, fmt.Errorf("stripenav: %w", err)
 		}
@@ -296,24 +298,24 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 
 	var (
 		invForMap *stripe.Invoice
-		opts      mapping.MapOptions
+		opts      invoicemap.MapOptions
 		op        string
 	)
 	switch event.Type {
 	case "invoice.finalized":
 		invForMap = inv
 		op = "CREATE"
-		opts = mapping.MapOptions{
+		opts = invoicemap.MapOptions{
 			Supplier:          h.cfg.Supplier,
-			Operation:         mapping.OpCreate,
+			Operation:         invoicemap.OpCreate,
 			ExchangeRateToHUF: rate,
 		}
 	case "invoice.voided", "invoice.marked_uncollectible":
 		invForMap = invoiceAsStorno(inv, h.cfg.Clock())
 		op = "STORNO"
-		opts = mapping.MapOptions{
+		opts = invoicemap.MapOptions{
 			Supplier:              h.cfg.Supplier,
-			Operation:             mapping.OpStorno,
+			Operation:             invoicemap.OpStorno,
 			OriginalInvoiceNumber: inv.Number,
 			ExchangeRateToHUF:     rate,
 		}
@@ -331,7 +333,7 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 	sub.InvoiceNumber = invForMap.Number
 	sub.Operation = op
 
-	mapped, err := mapping.MapInvoice(invForMap, opts)
+	mapped, err := invoicemap.MapInvoice(invForMap, opts)
 	if err != nil {
 		return err
 	}
@@ -415,9 +417,9 @@ func (h *BridgeHandler) processCreditNote(ctx context.Context, event *stripe.Eve
 	// We synthesise a minimal Stripe-Invoice-shaped object for the
 	// mapper: the credit note's lines become the modification lines.
 	invForMap := creditNoteAsInvoice(cn)
-	mapped, err := mapping.MapInvoice(invForMap, mapping.MapOptions{
+	mapped, err := invoicemap.MapInvoice(invForMap, invoicemap.MapOptions{
 		Supplier:              h.cfg.Supplier,
-		Operation:             mapping.OpModify,
+		Operation:             invoicemap.OpModify,
 		OriginalInvoiceNumber: cn.Invoice.Number,
 		ModificationIndex:     1, // caller-supplied indexing is out of scope for v0
 		ExchangeRateToHUF:     rate,

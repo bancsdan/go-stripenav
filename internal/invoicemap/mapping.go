@@ -1,4 +1,4 @@
-package mapping
+package invoicemap
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
 	"github.com/stripe/stripe-go/v82"
 )
@@ -39,33 +40,7 @@ const (
 	OpStorno Operation = "STORNO"
 )
 
-// Supplier identifies the merchant issuing the invoice. Required for
-// every CREATE: NAV will reject the submission if any field is missing.
-type Supplier struct {
-	// TaxNumber is the 11-character Hungarian VAT number, with or
-	// without hyphens. Example: "12345678-9-01".
-	TaxNumber string
-	// Name is the legal/registered name of the supplier.
-	Name string
-	// Address is the supplier's registered address.
-	Address Address
-	// BankAccount is optional and shows up on the invoice for the
-	// customer's reference.
-	BankAccount string
-}
-
-// Address is the merchant-facing simple address shape. NAV accepts either
-// a simpleAddress or detailedAddress; the mapper emits simpleAddress when
-// only the high-level fields are populated.
-type Address struct {
-	CountryCode      string
-	Region           string
-	PostalCode       string
-	City             string
-	AdditionalDetail string
-}
-
-func (a Address) toSchema() schemas.Address {
+func addressToSchema(a mapping.Address) schemas.Address {
 	return schemas.Address{
 		Simple: &schemas.SimpleAddress{
 			CountryCode:       a.CountryCode,
@@ -80,7 +55,7 @@ func (a Address) toSchema() schemas.Address {
 // MapOptions configures a single MapInvoice call.
 type MapOptions struct {
 	// Supplier identifies the merchant. Required.
-	Supplier Supplier
+	Supplier mapping.Supplier
 
 	// Operation is CREATE, MODIFY or STORNO. Defaults to CREATE.
 	Operation Operation
@@ -268,7 +243,7 @@ func issueDate(inv *stripe.Invoice) time.Time {
 	return time.Time{}
 }
 
-func buildSupplier(s Supplier) (schemas.SupplierInfo, error) {
+func buildSupplier(s mapping.Supplier) (schemas.SupplierInfo, error) {
 	tn, ok := splitHungarianTaxNumber(s.TaxNumber)
 	if !ok {
 		return schemas.SupplierInfo{}, newMappingError(CodeSupplierTaxNumberRequired, "Supplier.TaxNumber")
@@ -276,7 +251,7 @@ func buildSupplier(s Supplier) (schemas.SupplierInfo, error) {
 	return schemas.SupplierInfo{
 		SupplierTaxNumber: tn,
 		SupplierName:      s.Name,
-		SupplierAddress:   s.Address.toSchema(),
+		SupplierAddress:   addressToSchema(s.Address),
 		SupplierBank:      s.BankAccount,
 	}, nil
 }

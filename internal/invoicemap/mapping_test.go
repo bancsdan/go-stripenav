@@ -1,4 +1,4 @@
-package mapping
+package invoicemap
 
 import (
 	"encoding/xml"
@@ -8,17 +8,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/stripe/stripe-go/v82"
 )
 
-func defaultSupplier() Supplier {
-	return Supplier{
+func defaultSupplier() mapping.Supplier {
+	return mapping.Supplier{
 		TaxNumber: "12345678-9-01",
 		Name:      "Test Merchant Kft.",
-		Address: Address{
-			CountryCode: "HU",
-			PostalCode:  "1011",
-			City:        "Budapest",
+		Address: mapping.Address{
+			CountryCode:      "HU",
+			PostalCode:       "1011",
+			City:             "Budapest",
 			AdditionalDetail: "Fő utca 1.",
 		},
 	}

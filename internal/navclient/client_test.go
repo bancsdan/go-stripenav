@@ -1,4 +1,4 @@
-package nav
+package navclient
 
 import (
 	"context"
@@ -12,17 +12,19 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bancsdan/go-stripenav/nav"
 )
 
-func testConfig(baseURL string) Config {
-	return Config{
+func testConfig(baseURL string) nav.Config {
+	return nav.Config{
 		BaseURL:     baseURL,
 		Login:       "lwilsmn0uqdxe6u",
 		Password:    "secret",
 		TaxNumber:   "11111111",
 		SignKey:     "ac-ac3a-7f661bff7d342N43CYX4U9FG",
 		ExchangeKey: "0123456789ABCDEF",
-		Software: Software{
+		Software: nav.Software{
 			ID:             "SW01",
 			Name:           "go-stripenav",
 			Operation:      "LOCAL_SOFTWARE",
@@ -69,18 +71,18 @@ func TestNewClient_NormalisesTaxNumber(t *testing.T) {
 func TestNewClient_Validation(t *testing.T) {
 	cases := []struct {
 		name string
-		mut  func(*Config)
+		mut  func(*nav.Config)
 		want string
 	}{
-		{"missing base", func(c *Config) { c.BaseURL = "" }, "BaseURL"},
-		{"missing login", func(c *Config) { c.Login = "" }, "Login"},
-		{"missing password", func(c *Config) { c.Password = "" }, "Password"},
-		{"missing tax", func(c *Config) { c.TaxNumber = "" }, "TaxNumber"},
-		{"short tax", func(c *Config) { c.TaxNumber = "1234567" }, "does not contain 8 digits"},
-		{"non-digit tax", func(c *Config) { c.TaxNumber = "abc-def-ghi" }, "does not contain 8 digits"},
-		{"missing signKey", func(c *Config) { c.SignKey = "" }, "SignKey"},
-		{"bad exchangeKey", func(c *Config) { c.ExchangeKey = "shortkey" }, "ExchangeKey"},
-		{"missing software", func(c *Config) { c.Software.ID = "" }, "Software"},
+		{"missing base", func(c *nav.Config) { c.BaseURL = "" }, "BaseURL"},
+		{"missing login", func(c *nav.Config) { c.Login = "" }, "Login"},
+		{"missing password", func(c *nav.Config) { c.Password = "" }, "Password"},
+		{"missing tax", func(c *nav.Config) { c.TaxNumber = "" }, "TaxNumber"},
+		{"short tax", func(c *nav.Config) { c.TaxNumber = "1234567" }, "does not contain 8 digits"},
+		{"non-digit tax", func(c *nav.Config) { c.TaxNumber = "abc-def-ghi" }, "does not contain 8 digits"},
+		{"missing signKey", func(c *nav.Config) { c.SignKey = "" }, "SignKey"},
+		{"bad exchangeKey", func(c *nav.Config) { c.ExchangeKey = "shortkey" }, "ExchangeKey"},
+		{"missing software", func(c *nav.Config) { c.Software.ID = "" }, "Software"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,7 +206,7 @@ func TestClient_SubmitInvoice_ContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = c.SubmitInvoice(ctx, []InvoiceOperation{{Operation: "CREATE", InvoiceData: []byte("<x/>")}})
+	_, err = c.SubmitInvoice(ctx, []nav.InvoiceOperation{{Operation: "CREATE", InvoiceData: []byte("<x/>")}})
 	if err == nil {
 		t.Fatalf("expected context error, got nil")
 	}
@@ -219,13 +221,13 @@ func TestClient_SubmitInvoice_BatchTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	ops := make([]InvoiceOperation, MaxBatchSize+1)
+	ops := make([]nav.InvoiceOperation, nav.MaxBatchSize+1)
 	for i := range ops {
-		ops[i] = InvoiceOperation{Operation: "CREATE", InvoiceData: []byte("<x/>")}
+		ops[i] = nav.InvoiceOperation{Operation: "CREATE", InvoiceData: []byte("<x/>")}
 	}
 	_, err = c.SubmitInvoice(context.Background(), ops)
-	if !errors.Is(err, ErrBatchTooLarge) {
-		t.Fatalf("expected ErrBatchTooLarge, got %v", err)
+	if !errors.Is(err, nav.ErrBatchTooLarge) {
+		t.Fatalf("expected nav.ErrBatchTooLarge, got %v", err)
 	}
 }
 
@@ -298,11 +300,11 @@ func TestClient_DoSurfacesNAVError(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 	_, err = c.ExchangeToken(context.Background())
-	var navErr *NAVError
+	var navErr *nav.NAVError
 	if !errors.As(err, &navErr) {
-		t.Fatalf("expected *NAVError, got %T %v", err, err)
+		t.Fatalf("expected *nav.NAVError, got %T %v", err, err)
 	}
 	if navErr.HTTPStatus != 500 || navErr.Code != "INTERNAL_ERROR" || !navErr.Retriable {
-		t.Fatalf("unexpected NAVError: %+v", navErr)
+		t.Fatalf("unexpected nav.NAVError: %+v", navErr)
 	}
 }

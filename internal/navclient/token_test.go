@@ -1,4 +1,4 @@
-package nav
+package navclient
 
 import (
 	"bytes"

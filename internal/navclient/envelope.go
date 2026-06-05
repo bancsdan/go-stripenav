@@ -1,4 +1,4 @@
-package nav
+package navclient
 
 import (
 	"crypto/rand"
@@ -7,36 +7,24 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
 )
 
-// Software identifies the calling application as required by the NAV
-// "software" block. All fields are mandatory in the v3.0 envelope.
-type Software struct {
-	ID                 string // softwareId — 18 chars
-	Name               string
-	Operation          string // LOCAL_SOFTWARE or ONLINE_SERVICE
-	MainVersion        string
-	DevName            string
-	DevContact         string
-	DevCountryCode     string // ISO 3166-1 alpha-2, e.g. HU
-	DevTaxNumber       string
-}
-
 // softwareXML mirrors the on-wire <software> structure (default xmlns).
 type softwareXML struct {
-	XMLName            xml.Name `xml:"software"`
-	ID                 string   `xml:"softwareId"`
-	Name               string   `xml:"softwareName"`
-	Operation          string   `xml:"softwareOperation"`
-	MainVersion        string   `xml:"softwareMainVersion"`
-	DevName            string   `xml:"softwareDevName"`
-	DevContact         string   `xml:"softwareDevContact"`
-	DevCountryCode     string   `xml:"softwareDevCountryCode,omitempty"`
-	DevTaxNumber       string   `xml:"softwareDevTaxNumber,omitempty"`
+	XMLName        xml.Name `xml:"software"`
+	ID             string   `xml:"softwareId"`
+	Name           string   `xml:"softwareName"`
+	Operation      string   `xml:"softwareOperation"`
+	MainVersion    string   `xml:"softwareMainVersion"`
+	DevName        string   `xml:"softwareDevName"`
+	DevContact     string   `xml:"softwareDevContact"`
+	DevCountryCode string   `xml:"softwareDevCountryCode,omitempty"`
+	DevTaxNumber   string   `xml:"softwareDevTaxNumber,omitempty"`
 }
 
-func (s Software) toXML() softwareXML {
+func softwareToXML(s nav.Software) softwareXML {
 	return softwareXML{
 		ID:             s.ID,
 		Name:           s.Name,

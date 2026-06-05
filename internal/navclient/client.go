@@ -1,4 +1,4 @@
-package nav
+package navclient
 
 import (
 	"bytes"
@@ -13,89 +13,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
 	"golang.org/x/time/rate"
 )
 
-// DefaultRateLimit is the per-client outbound request ceiling, in
-// requests per second. NAV throttles a technical user that exceeds
-// roughly one request per second across all endpoints; 1.0 mirrors
-// that expectation. Override via Config.RateLimit.
-const DefaultRateLimit = 1.0
-
-// DefaultRateBurst is the bucket size for the rate limiter. A burst
-// of 1 means strictly even spacing. Override via Config.RateBurst.
-const DefaultRateBurst = 1
-
-// Well-known base URLs for the NAV Online Számla API.
-const (
-	ProductionBaseURL = "https://api.onlineszamla.nav.gov.hu/invoiceService/v3"
-	TestBaseURL       = "https://api-test.onlineszamla.nav.gov.hu/invoiceService/v3"
-)
-
-// MaxBatchSize is the documented per-batch operation limit for both
-// manageInvoice and manageAnnulment.
-const MaxBatchSize = 100
-
-// TODO: refactor with cleaner config handling with default values and validation, etc
-// Config carries the credentials and runtime knobs required by Client.
-type Config struct {
-	// BaseURL points at either ProductionBaseURL or TestBaseURL. Must be
-	// set explicitly so a misconfigured caller never targets production.
-	BaseURL string
-
-	// Login is the NAV technical user login (max 15 chars).
-	Login string
-	// Password is the NAV technical user password (plain — the client
-	// hashes it before sending).
-	Password string
-	// TaxNumber is the 8-digit Hungarian tax number the technical user
-	// belongs to.
-	TaxNumber string
-	// SignKey is the technical user's signature key (32 chars) used in
-	// the SHA3-512 request signature.
-	SignKey string
-	// ExchangeKey is the technical user's exchange key (16 chars) used to
-	// AES-128-ECB-decrypt the encodedExchangeToken returned by NAV.
-	ExchangeKey string
-
-	// Software identifies the calling application.
-	Software Software
-
-	// HTTPClient is used for all outbound NAV requests. Defaults to a new
-	// http.Client with a 30-second timeout.
-	HTTPClient *http.Client
-
-	// Clock returns "now" for header timestamps. Defaults to time.Now.
-	Clock func() time.Time
-
-	// Debug, when true, logs every outbound NAV request and inbound
-	// response body via slog.Default(). Use only locally — bodies
-	// include the signed envelope and (decoded) responses.
-	Debug bool
-
-	// RateLimit caps outbound requests to NAV at this many per second.
-	// NAV throttles clients that exceed roughly one request per second;
-	// the default (DefaultRateLimit = 1.0) matches that. Set to a
-	// higher value if NAV later raises the ceiling for your account.
-	// Ignored when DisableRateLimit=true.
-	RateLimit float64
-
-	// RateBurst is the maximum burst the limiter allows before
-	// re-spacing. Defaults to DefaultRateBurst (1) — strictly even
-	// spacing. A larger value lets you absorb a small spike before
-	// settling back to the steady rate.
-	RateBurst int
-
-	// DisableRateLimit skips outbound rate limiting entirely. Use in
-	// unit tests where wall-clock waits are noise, or against a
-	// gateway that handles rate limiting upstream.
-	DisableRateLimit bool
-}
-
-// Client is the NAV Online Számla v3.0 API client.
+// Client is the NAV Online Számla v3.0 API client. It's an internal
+// type: consumers reach it indirectly through stripenav.Handler, which
+// constructs one from the nav.Config the caller supplies.
 type Client struct {
-	cfg     Config
+	cfg     nav.Config
 	limiter *rate.Limiter // nil when DisableRateLimit=true
 }
 
@@ -108,7 +35,7 @@ type Token struct {
 
 // NewClient returns a configured *Client or an error if Config is missing
 // required fields.
-func NewClient(cfg Config) (*Client, error) {
+func NewClient(cfg nav.Config) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, errors.New("nav: BaseURL is required (use ProductionBaseURL or TestBaseURL)")
 	}
@@ -150,11 +77,11 @@ func NewClient(cfg Config) (*Client, error) {
 	if !cfg.DisableRateLimit {
 		r := cfg.RateLimit
 		if r <= 0 {
-			r = DefaultRateLimit
+			r = nav.DefaultRateLimit
 		}
 		burst := cfg.RateBurst
 		if burst <= 0 {
-			burst = DefaultRateBurst
+			burst = nav.DefaultRateBurst
 		}
 		c.limiter = rate.NewLimiter(rate.Limit(r), burst)
 	}
@@ -180,7 +107,7 @@ func (c *Client) ExchangeToken(ctx context.Context) (Token, error) {
 		XmlnsCom: xmlnsCommonURI,
 		Header:   ec.header(),
 		User:     ec.user(c.cfg.Login, c.cfg.Password, c.cfg.TaxNumber),
-		Software: c.cfg.Software.toXML(),
+		Software: softwareToXML(c.cfg.Software),
 	}
 
 	var resp schemas.TokenExchangeResponse
@@ -197,32 +124,17 @@ func (c *Client) ExchangeToken(ctx context.Context) (Token, error) {
 	return Token{Value: plain, ValidFrom: validFrom, ExpiresAt: validTo}, nil
 }
 
-// InvoiceOperation is one operation in a manageInvoice batch.
-type InvoiceOperation struct {
-	// Operation is CREATE, MODIFY or STORNO.
-	Operation string
-	// InvoiceData is the marshalled, base64-unencoded XML for one
-	// InvoiceData document. The client base64-encodes it before sending
-	// and computes the per-operation hash over the encoded form.
-	InvoiceData []byte
-}
-
-// SubmitResult is what the client returns for a successful submission.
-type SubmitResult struct {
-	TransactionID string
-}
-
 // SubmitInvoice submits a batch of CREATE/MODIFY/STORNO operations.
-func (c *Client) SubmitInvoice(ctx context.Context, ops []InvoiceOperation) (SubmitResult, error) {
+func (c *Client) SubmitInvoice(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
 	if len(ops) == 0 {
-		return SubmitResult{}, errors.New("nav: SubmitInvoice requires at least one operation")
+		return nav.SubmitResult{}, errors.New("nav: SubmitInvoice requires at least one operation")
 	}
-	if len(ops) > MaxBatchSize {
-		return SubmitResult{}, ErrBatchTooLarge
+	if len(ops) > nav.MaxBatchSize {
+		return nav.SubmitResult{}, nav.ErrBatchTooLarge
 	}
 	tok, err := c.ExchangeToken(ctx)
 	if err != nil {
-		return SubmitResult{}, err
+		return nav.SubmitResult{}, err
 	}
 
 	encOps := make([]invoiceOperationXML, len(ops))
@@ -245,7 +157,7 @@ func (c *Client) SubmitInvoice(ctx context.Context, ops []InvoiceOperation) (Sub
 		XmlnsCom:      xmlnsCommonURI,
 		Header:        ec.header(),
 		User:          ec.user(c.cfg.Login, c.cfg.Password, c.cfg.TaxNumber),
-		Software:      c.cfg.Software.toXML(),
+		Software:      softwareToXML(c.cfg.Software),
 		ExchangeToken: tok.Value,
 		Operations: invoiceOperationsXML{
 			CompressedContent: false,
@@ -255,29 +167,22 @@ func (c *Client) SubmitInvoice(ctx context.Context, ops []InvoiceOperation) (Sub
 
 	var resp schemas.ManageInvoiceResponse
 	if err := c.do(ctx, "/manageInvoice", req, &resp); err != nil {
-		return SubmitResult{}, err
+		return nav.SubmitResult{}, err
 	}
-	return SubmitResult{TransactionID: resp.TransactionID}, nil
-}
-
-// AnnulmentOperation is one operation in a manageAnnulment batch.
-type AnnulmentOperation struct {
-	// InvoiceAnnulment is the marshalled, base64-unencoded XML for one
-	// InvoiceAnnulment document.
-	InvoiceAnnulment []byte
+	return nav.SubmitResult{TransactionID: resp.TransactionID}, nil
 }
 
 // AnnulInvoice submits one or more ANNUL operations.
-func (c *Client) AnnulInvoice(ctx context.Context, ops []AnnulmentOperation) (SubmitResult, error) {
+func (c *Client) AnnulInvoice(ctx context.Context, ops []nav.AnnulmentOperation) (nav.SubmitResult, error) {
 	if len(ops) == 0 {
-		return SubmitResult{}, errors.New("nav: AnnulInvoice requires at least one operation")
+		return nav.SubmitResult{}, errors.New("nav: AnnulInvoice requires at least one operation")
 	}
-	if len(ops) > MaxBatchSize {
-		return SubmitResult{}, ErrBatchTooLarge
+	if len(ops) > nav.MaxBatchSize {
+		return nav.SubmitResult{}, nav.ErrBatchTooLarge
 	}
 	tok, err := c.ExchangeToken(ctx)
 	if err != nil {
-		return SubmitResult{}, err
+		return nav.SubmitResult{}, err
 	}
 
 	encOps := make([]annulmentOperationXML, len(ops))
@@ -301,7 +206,7 @@ func (c *Client) AnnulInvoice(ctx context.Context, ops []AnnulmentOperation) (Su
 		XmlnsCom:      xmlnsCommonURI,
 		Header:        ec.header(),
 		User:          ec.user(c.cfg.Login, c.cfg.Password, c.cfg.TaxNumber),
-		Software:      c.cfg.Software.toXML(),
+		Software:      softwareToXML(c.cfg.Software),
 		ExchangeToken: tok.Value,
 		Annulments: annulmentOperationsXML{
 			Annulments: encOps,
@@ -310,9 +215,9 @@ func (c *Client) AnnulInvoice(ctx context.Context, ops []AnnulmentOperation) (Su
 
 	var resp schemas.ManageAnnulmentResponse
 	if err := c.do(ctx, "/manageAnnulment", req, &resp); err != nil {
-		return SubmitResult{}, err
+		return nav.SubmitResult{}, err
 	}
-	return SubmitResult{TransactionID: resp.TransactionID}, nil
+	return nav.SubmitResult{TransactionID: resp.TransactionID}, nil
 }
 
 // QueryTransactionStatus polls NAV for the status of a prior submission.
@@ -325,7 +230,7 @@ func (c *Client) QueryTransactionStatus(ctx context.Context, transactionID strin
 		XmlnsCom:              xmlnsCommonURI,
 		Header:                ec.header(),
 		User:                  ec.user(c.cfg.Login, c.cfg.Password, c.cfg.TaxNumber),
-		Software:              c.cfg.Software.toXML(),
+		Software:              softwareToXML(c.cfg.Software),
 		TransactionID:         transactionID,
 		ReturnOriginalRequest: returnOriginal,
 	}
@@ -393,7 +298,7 @@ func (c *Client) do(ctx context.Context, path string, req any, out any) error {
 		if br := extractBasicResult(respBody); br.FuncCode != "" {
 			return navErrorFromResult(httpResp.StatusCode, br)
 		}
-		return &NAVError{
+		return &nav.NAVError{
 			HTTPStatus: httpResp.StatusCode,
 			Message:    fmt.Sprintf("unexpected NAV response: %s", trim(respBody, 200)),
 			Retriable:  httpResp.StatusCode >= 500,

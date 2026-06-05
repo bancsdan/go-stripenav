@@ -3,34 +3,23 @@ package nav
 import (
 	"errors"
 	"fmt"
-
-	"github.com/bancsdan/go-stripenav/nav/schemas"
 )
 
-// ErrBatchTooLarge is returned by SubmitInvoice/AnnulInvoice when the
-// caller passes more than 100 operations in a single batch.
+// ErrBatchTooLarge is returned by the NAV client when more than
+// MaxBatchSize operations are submitted in a single batch.
 var ErrBatchTooLarge = errors.New("nav: per-batch operation limit (100) exceeded")
 
 // NAVError is the typed error returned for any failed NAV response. It
 // captures the HTTP status, the NAV funcCode/errorCode pair, the human
 // message, and a Retriable bool derived from the documented error list.
+// Consumers can errors.As() into this to inspect retriability or surface
+// NAV-specific codes.
 type NAVError struct {
-	HTTPStatus      int
-	FuncCode        string
-	Code            string
-	Message         string
-	Retriable       bool
-	OperationErrors map[int]OperationError
-}
-
-// OperationError carries per-operation failures from a manageInvoice or
-// manageAnnulment response.
-type OperationError struct {
-	Index        int
-	BatchIndex   int
-	InvoiceStatus string
-	Code         string
-	Message      string
+	HTTPStatus int
+	FuncCode   string
+	Code       string
+	Message    string
+	Retriable  bool
 }
 
 func (e *NAVError) Error() string {
@@ -51,48 +40,4 @@ func (e *NAVError) IsRetriable() bool {
 		return false
 	}
 	return e.Retriable
-}
-
-// retriableErrorCodes are NAV error codes that are worth retrying after a
-// backoff. The set is intentionally small — any unknown code defaults to
-// non-retriable so we surface integration bugs instead of looping forever.
-var retriableErrorCodes = map[string]bool{
-	"OPERATION_FAILED":   true,
-	"INTERNAL_ERROR":     true,
-	"INVALID_REQUEST":    false,
-	"INVALID_USER_RIGHT": false,
-	"INVALID_SECURITY_USER": false,
-	"INVALID_SOFTWARE":   false,
-	"INVALID_VERSION":    false,
-}
-
-func navErrorFromResult(httpStatus int, r schemas.BasicResult) *NAVError {
-	retriable := false
-	if httpStatus >= 500 {
-		retriable = true
-	}
-	if v, ok := retriableErrorCodes[r.ErrorCode]; ok {
-		retriable = v
-	}
-	return &NAVError{
-		HTTPStatus: httpStatus,
-		FuncCode:   r.FuncCode,
-		Code:       r.ErrorCode,
-		Message:    r.Message,
-		Retriable:  retriable,
-	}
-}
-
-func navErrorFromException(httpStatus int, e schemas.GeneralExceptionResponse) *NAVError {
-	retriable := httpStatus >= 500
-	if v, ok := retriableErrorCodes[e.ErrorCode]; ok {
-		retriable = v
-	}
-	return &NAVError{
-		HTTPStatus: httpStatus,
-		FuncCode:   e.FuncCode,
-		Code:       e.ErrorCode,
-		Message:    e.Message,
-		Retriable:  retriable,
-	}
 }

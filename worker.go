@@ -41,8 +41,9 @@ type noopMetrics struct{}
 func (noopMetrics) RecordSubmissionResult(string)       {}
 func (noopMetrics) RecordLatency(string, time.Duration) {}
 
-// NAVClient is the subset of *nav.Client the worker depends on. Defining
-// it as an interface keeps the worker easy to test with a fake.
+// NAVClient is the subset of the NAV transport client the worker depends
+// on. Defining it as an interface keeps the worker easy to test with a
+// fake; the production implementation lives in internal/navclient.
 type NAVClient interface {
 	SubmitInvoice(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error)
 	AnnulInvoice(ctx context.Context, ops []nav.AnnulmentOperation) (nav.SubmitResult, error)

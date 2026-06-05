@@ -263,19 +263,27 @@ github.com/bancsdan/go-stripenav
 ├── submission.go           // Submission, SubmissionStore, state machine
 ├── worker.go               // background worker, retries, deadline, parent deps
 ├── credit_note.go          // invoice → storno + credit-note synthesis
-├── mapping/                // Stripe → NAV translation (pure, no I/O)
-│   ├── mapping.go
-│   ├── tax.go              // Hungarian VAT-number splitting, customer category
-│   ├── currency.go         // big.Rat amounts, HUF summary
-│   └── errors.go
-├── nav/                    // NAV API client
-│   ├── client.go           // tokenExchange, manageInvoice, manageAnnulment, queryTransactionStatus
-│   ├── envelope.go         // common:header, common:user, software
-│   ├── sign.go             // SHA-512 password hash, SHA3-512 request signature
-│   ├── token.go            // AES-128-ECB + PKCS#7
-│   ├── requests.go         // per-endpoint request envelopes
-│   ├── errors.go           // *NAVError with retriability
+├── mapping/                // PUBLIC: Supplier, Address (Config fields only)
+│   └── types.go
+├── nav/                    // PUBLIC: Config, Software, base URLs, NAVError,
+│   ├── config.go           //         InvoiceOperation, AnnulmentOperation,
+│   ├── constants.go        //         SubmitResult, ErrBatchTooLarge
+│   ├── errors.go
+│   ├── types.go
 │   └── schemas/            // hand-written OSA/3.0/data, OSA/3.0/api, etc.
+├── internal/
+│   ├── navclient/          // NAV API HTTP client implementation
+│   │   ├── client.go       // tokenExchange, manageInvoice, manageAnnulment,
+│   │   ├── envelope.go     //   queryTransactionStatus, request signing,
+│   │   ├── sign.go         //   AES token decryption, retriability mapping
+│   │   ├── token.go
+│   │   ├── requests.go
+│   │   └── errors.go
+│   └── invoicemap/         // Stripe → NAV translation (pure, no I/O)
+│       ├── mapping.go      // MapInvoice, MapOptions, Operation
+│       ├── tax.go          // Hungarian VAT-number splitting, customer category
+│       ├── currency.go     // big.Rat amounts, HUF summary
+│       └── errors.go
 ├── storeinmem/             // reference SubmissionStore for tests + dev
 ├── e2e/                    // end-to-end harness against real NAV test env
 │                           // (//go:build navtest — skipped in default test run)

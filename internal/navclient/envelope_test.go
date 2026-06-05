@@ -1,10 +1,12 @@
-package nav
+package navclient
 
 import (
 	"encoding/xml"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bancsdan/go-stripenav/nav"
 )
 
 func TestFormatTimestamp(t *testing.T) {
@@ -40,7 +42,7 @@ func TestTokenExchangeRequest_OnWire(t *testing.T) {
 		XmlnsCom: xmlnsCommonURI,
 		Header:   ec.header(),
 		User:     ec.user("login", "password", "11111111"),
-		Software: Software{ID: "SW01", Name: "n", Operation: "LOCAL_SOFTWARE", MainVersion: "v"}.toXML(),
+		Software: softwareToXML(nav.Software{ID: "SW01", Name: "n", Operation: "LOCAL_SOFTWARE", MainVersion: "v"}),
 	}
 	body, err := xml.Marshal(req)
 	if err != nil {
