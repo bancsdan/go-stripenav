@@ -34,7 +34,6 @@ import (
     stripenav "github.com/bancsdan/go-stripenav"
     "github.com/bancsdan/go-stripenav/mapping"
     "github.com/bancsdan/go-stripenav/nav"
-    "github.com/bancsdan/go-stripenav/storeinmem"
 )
 
 func main() {
@@ -66,7 +65,9 @@ func main() {
                 City:        "Budapest",
             },
         },
-        Store: storeinmem.New(), // dev only — implement SubmissionStore for production
+        // Store left nil: the bridge falls back to an internal in-memory
+        // store and logs a Warn. Production callers MUST supply a
+        // durable SubmissionStore implementation (Postgres etc.).
     })
     if err != nil {
         log.Fatal(err)
@@ -222,8 +223,9 @@ h, err := stripenav.Handler(cfg, stripenav.WithNAVClient(fakeClient))
 
 ## Persistence
 
-The bundled `storeinmem.Store` is a sync.Mutex-protected map. **State is
-lost on restart** — fine for unit tests and local dev, not for production.
+When `Config.Store` is left nil, the bridge falls back to an internal
+in-memory store and emits a Warn log at handler init. **State is lost
+on restart** — fine for unit tests and local dev, NEVER for production.
 
 For production, implement `stripenav.SubmissionStore` against your
 durable storage:
@@ -284,7 +286,10 @@ github.com/bancsdan/go-stripenav
 │       ├── tax.go          // Hungarian VAT-number splitting, customer category
 │       ├── currency.go     // big.Rat amounts, HUF summary
 │       └── errors.go
-├── storeinmem/             // reference SubmissionStore for tests + dev
+│   ├── storeinmem/         // internal in-memory SubmissionStore (default
+│   │                       //   when Config.Store is nil; dev/test only)
+│   └── submission/         // Submission, Store interface, status/kind
+│                           //   types — re-exported from root as aliases
 ├── e2e/                    // end-to-end harness against real NAV test env
 │                           // (//go:build navtest — skipped in default test run)
 └── docs/

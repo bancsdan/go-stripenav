@@ -9,7 +9,7 @@ import (
 	"time"
 
 	stripenav "github.com/bancsdan/go-stripenav"
-	"github.com/bancsdan/go-stripenav/storeinmem"
+	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 )
 
 func TestStore_PutGetDuplicate(t *testing.T) {

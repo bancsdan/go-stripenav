@@ -17,7 +17,7 @@ import (
 	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
-	"github.com/bancsdan/go-stripenav/storeinmem"
+	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 	"github.com/stripe/stripe-go/v82/webhook"
 )
 
@@ -493,10 +493,6 @@ func TestHandler_InvalidConfig(t *testing.T) {
 		t.Fatalf("expected StripeWebhookSecret error, got %v", err)
 	}
 	_, err = stripenav.Handler(stripenav.Config{StripeWebhookSecret: "x"})
-	if err == nil || !strings.Contains(err.Error(), "Store") {
-		t.Fatalf("expected Store error, got %v", err)
-	}
-	_, err = stripenav.Handler(stripenav.Config{StripeWebhookSecret: "x", Store: storeinmem.New()})
 	if err == nil || !strings.Contains(err.Error(), "Supplier") {
 		t.Fatalf("expected Supplier error, got %v", err)
 	}

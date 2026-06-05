@@ -1,9 +1,7 @@
 // Package storeinmem provides an in-process reference SubmissionStore.
-//
-// It is intended for unit tests and local examples ONLY. State is lost
-// on process restart; there is no replication, no durability, no
-// concurrent access across processes. Do not use this in production.
-// Implement stripenav.SubmissionStore against your own database instead.
+// Used as the bridge's default when no Store is supplied — appropriate
+// for unit tests and local examples only. State is lost on process
+// restart.
 package storeinmem
 
 import (
@@ -13,25 +11,25 @@ import (
 	"sync"
 	"time"
 
-	stripenav "github.com/bancsdan/go-stripenav"
+	"github.com/bancsdan/go-stripenav/internal/submission"
 )
 
 // Compile-time interface check.
-var _ stripenav.SubmissionStore = (*Store)(nil)
+var _ submission.Store = (*Store)(nil)
 
-// Store is the reference SubmissionStore backed by an in-process map.
+// Store is the reference Store backed by an in-process map.
 type Store struct {
 	mu   sync.Mutex
-	rows map[string]stripenav.Submission
+	rows map[string]submission.Submission
 }
 
 // New returns an empty in-memory store.
 func New() *Store {
-	return &Store{rows: map[string]stripenav.Submission{}}
+	return &Store{rows: map[string]submission.Submission{}}
 }
 
 // Put inserts a new submission. Returns an error if eventID already exists.
-func (s *Store) Put(ctx context.Context, sub stripenav.Submission) error {
+func (s *Store) Put(ctx context.Context, sub submission.Submission) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -44,22 +42,22 @@ func (s *Store) Put(ctx context.Context, sub stripenav.Submission) error {
 	return nil
 }
 
-// Get returns the submission for eventID, or stripenav.ErrNotFound.
-func (s *Store) Get(ctx context.Context, eventID string) (stripenav.Submission, error) {
+// Get returns the submission for eventID, or submission.ErrNotFound.
+func (s *Store) Get(ctx context.Context, eventID string) (submission.Submission, error) {
 	if err := ctx.Err(); err != nil {
-		return stripenav.Submission{}, err
+		return submission.Submission{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sub, ok := s.rows[eventID]
 	if !ok {
-		return stripenav.Submission{}, stripenav.ErrNotFound
+		return submission.Submission{}, submission.ErrNotFound
 	}
 	return sub, nil
 }
 
 // UpdateStatus atomically reads, mutates, and writes the submission.
-func (s *Store) UpdateStatus(ctx context.Context, eventID string, mut func(*stripenav.Submission) error) error {
+func (s *Store) UpdateStatus(ctx context.Context, eventID string, mut func(*submission.Submission) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -67,7 +65,7 @@ func (s *Store) UpdateStatus(ctx context.Context, eventID string, mut func(*stri
 	defer s.mu.Unlock()
 	sub, ok := s.rows[eventID]
 	if !ok {
-		return stripenav.ErrNotFound
+		return submission.ErrNotFound
 	}
 	if err := mut(&sub); err != nil {
 		return err
@@ -81,7 +79,7 @@ func (s *Store) UpdateStatus(ctx context.Context, eventID string, mut func(*stri
 // (NextAttemptAt <= now) and either unclaimed or whose lease has
 // expired. Mirrors the FOR UPDATE SKIP LOCKED semantics the Postgres
 // adapter implements, but within a single process.
-func (s *Store) ClaimBatch(ctx context.Context, claimer string, limit int, lease time.Duration) ([]stripenav.Submission, error) {
+func (s *Store) ClaimBatch(ctx context.Context, claimer string, limit int, lease time.Duration) ([]submission.Submission, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -95,7 +93,7 @@ func (s *Store) ClaimBatch(ctx context.Context, claimer string, limit int, lease
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	candidates := make([]stripenav.Submission, 0)
+	candidates := make([]submission.Submission, 0)
 	for _, sub := range s.rows {
 		if sub.IsTerminal() {
 			continue
@@ -123,7 +121,7 @@ func (s *Store) ClaimBatch(ctx context.Context, claimer string, limit int, lease
 		candidates = candidates[:limit]
 	}
 
-	out := make([]stripenav.Submission, 0, len(candidates))
+	out := make([]submission.Submission, 0, len(candidates))
 	until := now.Add(lease)
 	for _, sub := range candidates {
 		sub.ClaimedBy = claimer
@@ -148,11 +146,11 @@ func (s *Store) RenewClaim(ctx context.Context, eventID, claimer string, lease t
 	defer s.mu.Unlock()
 	sub, ok := s.rows[eventID]
 	if !ok {
-		return stripenav.ErrNotFound
+		return submission.ErrNotFound
 	}
 	// Lease must still be ours (either unexpired or expired but unclaimed by others).
 	if sub.ClaimedBy != claimer {
-		return stripenav.ErrClaimLost
+		return submission.ErrClaimLost
 	}
 	if sub.ClaimedUntil.Before(now) {
 		// Lease has technically expired but no other claimer has taken it.
@@ -175,10 +173,10 @@ func (s *Store) ReleaseClaim(ctx context.Context, eventID, claimer string) error
 	defer s.mu.Unlock()
 	sub, ok := s.rows[eventID]
 	if !ok {
-		return stripenav.ErrNotFound
+		return submission.ErrNotFound
 	}
 	if sub.ClaimedBy != claimer {
-		return stripenav.ErrClaimLost
+		return submission.ErrClaimLost
 	}
 	sub.ClaimedBy = ""
 	sub.ClaimedUntil = time.Time{}
@@ -189,13 +187,13 @@ func (s *Store) ReleaseClaim(ctx context.Context, eventID, claimer string) error
 
 // FindByInvoiceNumber returns every submission recorded for the given
 // NAV invoice number, ordered by CreatedAt.
-func (s *Store) FindByInvoiceNumber(ctx context.Context, invoiceNumber string) ([]stripenav.Submission, error) {
+func (s *Store) FindByInvoiceNumber(ctx context.Context, invoiceNumber string) ([]submission.Submission, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]stripenav.Submission, 0)
+	out := make([]submission.Submission, 0)
 	for _, sub := range s.rows {
 		if sub.InvoiceNumber == invoiceNumber {
 			out = append(out, sub)

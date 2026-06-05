@@ -38,7 +38,7 @@ import (
 	stripenav "github.com/bancsdan/go-stripenav"
 	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
-	"github.com/bancsdan/go-stripenav/storeinmem"
+	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 	"github.com/stripe/stripe-go/v82/webhook"
 )
 

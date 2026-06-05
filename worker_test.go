@@ -11,7 +11,7 @@ import (
 	stripenav "github.com/bancsdan/go-stripenav"
 	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
-	"github.com/bancsdan/go-stripenav/storeinmem"
+	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 )
 
 // fakeNAVClient is a configurable NAVClient for unit tests.

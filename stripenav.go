@@ -15,6 +15,7 @@ import (
 
 	"github.com/bancsdan/go-stripenav/internal/invoicemap"
 	"github.com/bancsdan/go-stripenav/internal/navclient"
+	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
 	stripe "github.com/stripe/stripe-go/v82"
@@ -35,7 +36,11 @@ type Config struct {
 	// Supplier identifies the merchant. Required.
 	Supplier mapping.Supplier
 
-	// Store persists submission state. Required.
+	// Store persists submission state. When nil, the bridge falls back
+	// to an internal in-memory store and logs a Warn — fine for local
+	// development, NEVER for production (submissions vanish on
+	// restart). Production callers MUST supply a durable
+	// implementation (Postgres etc.).
 	Store SubmissionStore
 
 	// ExchangeRateProvider returns the foreign→HUF exchange rate for
@@ -169,14 +174,19 @@ func validateConfig(cfg *Config) error {
 	if cfg.StripeWebhookSecret == "" {
 		return errors.New("stripenav: Config.StripeWebhookSecret is required")
 	}
-	if cfg.Store == nil {
-		return errors.New("stripenav: Config.Store is required")
-	}
 	if cfg.Supplier.TaxNumber == "" {
 		return errors.New("stripenav: Config.Supplier.TaxNumber is required")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.Store == nil {
+		// Fall back to an internal in-memory store so the bridge works
+		// out of the box for local development. State is lost on
+		// restart — production callers must supply a durable Store.
+		// Warn loudly so anyone running silently in prod sees this.
+		cfg.Logger.Warn("stripenav: no Store configured; using internal in-memory store — submissions will be LOST on restart, do not use in production")
+		cfg.Store = storeinmem.New()
 	}
 	if cfg.Metrics == nil {
 		cfg.Metrics = noopMetrics{}
