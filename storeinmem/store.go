@@ -103,8 +103,15 @@ func (s *Store) ClaimBatch(ctx context.Context, claimer string, limit int, lease
 		if sub.NextAttemptAt.After(now) {
 			continue
 		}
-		// Skip rows held by someone else whose lease hasn't expired.
-		if sub.ClaimedBy != "" && sub.ClaimedBy != claimer && sub.ClaimedUntil.After(now) {
+		// Skip rows already held with a valid lease — regardless of
+		// whether the holder is another worker or ourselves. Allowing
+		// the same claimer to re-claim its own active rows would
+		// spawn a duplicate lifecycle goroutine for the row, and the
+		// first lifecycle's ReleaseClaim would then trip the second
+		// lifecycle's renew loop into a spurious "claim lost"
+		// warning. (The Postgres SKIP LOCKED equivalent doesn't allow
+		// this because the row lock blocks the duplicate selection.)
+		if sub.ClaimedBy != "" && sub.ClaimedUntil.After(now) {
 			continue
 		}
 		candidates = append(candidates, sub)
