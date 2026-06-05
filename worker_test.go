@@ -220,6 +220,96 @@ func TestWorker_TransientFailureRetries(t *testing.T) {
 	}
 }
 
+// flakyRenewStore wraps an in-memory store and lets RenewClaim be
+// forced to fail to simulate the lease being stolen by another
+// replica or the store dropping the claim.
+type flakyRenewStore struct {
+	*storeinmem.Store
+	renewErr atomic.Value // error or nil
+}
+
+func (s *flakyRenewStore) RenewClaim(ctx context.Context, eventID, claimer string, lease time.Duration) error {
+	if v, ok := s.renewErr.Load().(error); ok && v != nil {
+		return v
+	}
+	return s.Store.RenewClaim(ctx, eventID, claimer, lease)
+}
+
+func (s *flakyRenewStore) setRenewErr(err error) {
+	s.renewErr.Store(err)
+}
+
+// TestWorker_LostLeaseStopsLifecycle pins the multi-replica safety
+// fix: if the lease can't be renewed (claim stolen, store dropped
+// the row, network split), the lifecycle goroutine must stop touching
+// the row immediately rather than continuing to call NAV and
+// UpdateStatus under a stale claim. Two replicas both processing the
+// same row would otherwise submit the same invoice to NAV twice.
+func TestWorker_LostLeaseStopsLifecycle(t *testing.T) {
+	base := storeinmem.New()
+	flaky := &flakyRenewStore{Store: base}
+
+	submitStarted := make(chan struct{})
+	client := &fakeNAVClient{
+		submitFn: func(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
+			close(submitStarted)
+			// Block until the lifecycle's leaseCtx cancels us.
+			<-ctx.Done()
+			return nav.SubmitResult{}, ctx.Err()
+		},
+	}
+
+	// Short lease so the renew loop ticks well within the test window.
+	w, err := stripenav.NewWorker(stripenav.WorkerConfig{
+		Store:         flaky,
+		Client:        client,
+		Clock:         time.Now,
+		ClaimerID:     "test",
+		MaxSleep:      time.Second,
+		PollInterval:  100 * time.Millisecond,
+		LeaseDuration: 60 * time.Millisecond, // renew every ~20ms
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := base.Put(context.Background(), stripenav.Submission{
+		EventID:       "evt_lease_lost",
+		Kind:          stripenav.KindInvoice,
+		Status:        stripenav.StatusPending,
+		IssuedAt:      now,
+		CreatedAt:     now,
+		NextAttemptAt: now.Add(-time.Second),
+		RawEvent:      sampleInvoiceData(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Once the submit blocks, simulate the claim being stolen by
+	// flipping RenewClaim to fail.
+	go func() {
+		<-submitStarted
+		flaky.setRenewErr(stripenav.ErrClaimLost)
+	}()
+
+	if err := w.Tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+
+	// Submit was called exactly once, blocked on context, then aborted
+	// by the lease-cancelled leaseCtx. The row must still be Pending —
+	// the lifecycle should NOT have transitioned it to Submitted under
+	// a lost lease.
+	got, _ := base.Get(context.Background(), "evt_lease_lost")
+	if got.Status != stripenav.StatusPending {
+		t.Errorf("status = %s, want Pending (lifecycle should have abandoned the row)", got.Status)
+	}
+	if got.TransactionID != "" {
+		t.Errorf("TransactionID = %q, want empty (no successful submit)", got.TransactionID)
+	}
+}
+
 // TestWorker_NonRetriableErrorRejects: first attempt fails with a
 // non-retriable error → row moves to rejected immediately.
 func TestWorker_NonRetriableErrorRejects(t *testing.T) {

@@ -279,18 +279,25 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 		_ = w.store.ReleaseClaim(relCtx, initial.EventID, w.claimerID)
 	}()
 
+	// leaseCtx is cancelled both by parent ctx cancellation (shutdown)
+	// AND by renewLease when it detects we've lost the claim (another
+	// replica stole it, the row was deleted, the store is down). Using
+	// leaseCtx for every store / NAV call inside the lifecycle ensures
+	// we stop touching shared state the moment our ownership is gone —
+	// without this the lifecycle would happily UpdateStatus and submit
+	// to NAV under a stale claim, causing duplicate work.
 	leaseCtx, cancelLease := context.WithCancel(ctx)
 	defer cancelLease()
-	go w.renewLease(leaseCtx, initial.EventID)
+	go w.renewLease(leaseCtx, initial.EventID, cancelLease)
 
 	sub := initial
 	for {
-		if ctx.Err() != nil {
+		if leaseCtx.Err() != nil {
 			return
 		}
 
 		if !sub.IssuedAt.IsZero() && w.clock().Sub(sub.IssuedAt) > ReportingDeadline {
-			_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+			_ = w.store.UpdateStatus(leaseCtx, sub.EventID, func(s *Submission) error {
 				s.LastError = "24-hour NAV reporting deadline elapsed"
 				return s.Transition(StatusAborted)
 			})
@@ -302,18 +309,18 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 
 		switch sub.Status {
 		case StatusPending:
-			if !w.parentReady(ctx, sub) {
+			if !w.parentReady(leaseCtx, sub) {
 				return
 			}
-			w.attemptSubmit(ctx, sub)
+			w.attemptSubmit(leaseCtx, sub)
 		case StatusSubmitted, StatusProcessing:
-			w.pollStatus(ctx, sub)
+			w.pollStatus(leaseCtx, sub)
 		case StatusAccepted, StatusRejected, StatusAborted:
 			return
 		}
 
 		// Re-read the row after acting on it.
-		fresh, err := w.store.Get(ctx, sub.EventID)
+		fresh, err := w.store.Get(leaseCtx, sub.EventID)
 		if err != nil {
 			// Shutdown races cancel ctx mid-loop; that's expected, not a warning.
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -339,7 +346,7 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 		}
 
 		select {
-		case <-ctx.Done():
+		case <-leaseCtx.Done():
 			return
 		case <-time.After(wait):
 		}
@@ -348,8 +355,11 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 
 // renewLease periodically extends the claim while the lifecycle
 // goroutine is processing. Stops when ctx is cancelled (lifecycle
-// exits) or when the renewal fails (claim was stolen / row deleted).
-func (w *Worker) renewLease(ctx context.Context, eventID string) {
+// exits naturally) or when a renewal fails. On renewal failure it
+// invokes onLost so the lifecycle's context cancels and the loop
+// stops touching the row — preventing two replicas from both
+// processing a row whose lease passed to the other one.
+func (w *Worker) renewLease(ctx context.Context, eventID string, onLost func()) {
 	ticker := time.NewTicker(w.leaseDuration / 3)
 	defer ticker.Stop()
 	for {
@@ -359,8 +369,9 @@ func (w *Worker) renewLease(ctx context.Context, eventID string) {
 		case <-ticker.C:
 			if err := w.store.RenewClaim(ctx, eventID, w.claimerID, w.leaseDuration); err != nil {
 				if !errors.Is(err, context.Canceled) {
-					w.logger.Warn("stripenav: lease renewal failed",
+					w.logger.Warn("stripenav: lease renewal failed; abandoning row",
 						"event_id", eventID, "err", err)
+					onLost()
 				}
 				return
 			}
