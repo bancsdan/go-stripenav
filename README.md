@@ -119,13 +119,12 @@ Implementation details:
   stolen, the store dropped the row, etc.) the lifecycle goroutine
   aborts immediately rather than continuing to write under a stale
   claim.
-- **Outbound rate limiting**: every NAV API call goes through a per-
-  client token-bucket limiter at 1 request/second (NAV's documented
-  per-technical-user ceiling) with burst 1. Override via
+- **Outbound rate limiting**: every NAV API call goes through a
+  per-client token-bucket limiter at 1 request/second (matching NAV's
+  documented per-source-IP ceiling) with burst 1. Override via
   `nav.Config.RateLimit` / `RateBurst`, disable for tests with
-  `DisableRateLimit=true`. The limiter is in-process only; multiple
-  replicas sharing one NAV technical user need coordination at a
-  higher layer (Redis, etc.) to share the budget.
+  `DisableRateLimit=true`. The limiter is in-process only — see the
+  multi-replica note below.
 - **Hungarian calendar dates**: every date field submitted to NAV
   (`invoiceIssueDate`, `invoiceDeliveryDate`, `paymentDate`, the
   `invoiceDeliveryPeriodStart/End` pair) is rendered in a fixed UTC+2
@@ -159,6 +158,37 @@ Implementation details:
   finalization at the start of the cycle. The period-span check is the
   signal (not `billing_reason`) so that quote-originated subscription
   invoices (`billing_reason=quote_accept`) are also covered.
+
+### Multi-replica deployments and NAV's rate limit
+
+NAV's rate limit is **per source IP**, not per technical user or per
+process. In the typical cloud deployment pattern — ECS Fargate or EKS
+pods running in private subnets with outbound traffic routed through
+a NAT Gateway — every replica appears to NAV as the *same* IP (the
+NAT Gateway's Elastic IP). Multi-AZ setups give you one EIP per AZ,
+but tasks aren't pinned to AZs, so you generally can't predict which
+EIP a given request will egress from. The library's built-in limiter
+is per-process, so N replicas at 1 req/s collectively hit NAV at N
+req/s — and NAV will start returning 429s as soon as you scale past
+one instance. You have a few options, in order of pragmatism:
+
+1. **Divide the budget per replica.** Set
+   `nav.Config.RateLimit = 1.0 / N` for an N-replica deployment.
+   Wasteful when some replicas are idle, and N needs updating when
+   you scale, but zero new infrastructure.
+2. **Distributed rate limiter.** Wrap the NAV client with a
+   shared-state limiter (Redis token bucket, DynamoDB counter,
+   etc.). The library doesn't ship this, but the `*http.Client` on
+   `nav.Config.HTTPClient` is the right place to plug in a
+   middleware that does the global enforcement.
+3. **Egress sidecar.** Route NAV traffic through a single proxy
+   (Envoy, HAProxy, an API gateway) that does the rate limiting
+   upstream of your replicas, and set `DisableRateLimit=true` on
+   every replica. Useful if you already run a service mesh.
+
+If you're running a single replica today, the default 1 req/s is
+correct and you can ignore all of this — but plan ahead before
+scaling horizontally.
 
 ## Configuration
 
