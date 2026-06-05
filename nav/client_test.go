@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,11 @@ func testConfig(baseURL string) Config {
 			DevCountryCode: "HU",
 		},
 		Clock: func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+		// Disable rate limiting in unit tests — the default 1/s
+		// would add seconds of wall time to multi-call tests for no
+		// gain (we're not testing rate-limit behaviour here).
+		// TestClient_RateLimit explicitly enables it.
+		DisableRateLimit: true,
 	}
 }
 
@@ -220,6 +226,61 @@ func TestClient_SubmitInvoice_BatchTooLarge(t *testing.T) {
 	_, err = c.SubmitInvoice(context.Background(), ops)
 	if !errors.Is(err, ErrBatchTooLarge) {
 		t.Fatalf("expected ErrBatchTooLarge, got %v", err)
+	}
+}
+
+// TestClient_RateLimitSpacesRequests pins the per-client rate limiter
+// behaviour: with a 10/s rate and the default burst of 1, three
+// successive `do` calls must be spaced ~100ms apart. The first call
+// consumes the burst and goes through immediately; calls 2 and 3 each
+// wait one bucket interval. This catches regressions where the
+// limiter is wired up but the Wait() is bypassed or where the
+// configured rate isn't honoured.
+func TestClient_RateLimitSpacesRequests(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		timestamps []time.Time
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		timestamps = append(timestamps, time.Now())
+		mu.Unlock()
+		// Return whatever; we're only checking timing here.
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, xml.Header+`<TokenExchangeResponse xmlns="http://schemas.nav.gov.hu/OSA/3.0/api"><result xmlns="http://schemas.nav.gov.hu/NTCA/1.0/common"><funcCode>OK</funcCode></result><encodedExchangeToken>AA==</encodedExchangeToken><tokenValidityFrom>2026-01-01T12:00:00.000Z</tokenValidityFrom><tokenValidityTo>2026-01-01T12:05:00.000Z</tokenValidityTo></TokenExchangeResponse>`)
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL)
+	cfg.DisableRateLimit = false
+	cfg.RateLimit = 10 // 100ms between calls
+	cfg.RateBurst = 1
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		// ExchangeToken's parse will fail (the fixture token is too
+		// short to decrypt), but the HTTP call still completes — that's
+		// all we need for the timestamp check.
+		_, _ = c.ExchangeToken(context.Background())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(timestamps) != 3 {
+		t.Fatalf("got %d server hits, want 3", len(timestamps))
+	}
+	// Two gaps, each should be ≥ ~100ms (the bucket refill interval).
+	// Allow a small slack — the limiter is precise but goroutine
+	// scheduling can shave a few ms.
+	for i := 1; i < len(timestamps); i++ {
+		gap := timestamps[i].Sub(timestamps[i-1])
+		if gap < 80*time.Millisecond {
+			t.Errorf("gap %d-%d = %s, want ≥80ms (10/s limiter)",
+				i-1, i, gap)
+		}
 	}
 }
 

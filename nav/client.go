@@ -14,7 +14,18 @@ import (
 	"time"
 
 	"github.com/bancsdan/go-stripenav/nav/schemas"
+	"golang.org/x/time/rate"
 )
+
+// DefaultRateLimit is the per-client outbound request ceiling, in
+// requests per second. NAV throttles a technical user that exceeds
+// roughly one request per second across all endpoints; 1.0 mirrors
+// that expectation. Override via Config.RateLimit.
+const DefaultRateLimit = 1.0
+
+// DefaultRateBurst is the bucket size for the rate limiter. A burst
+// of 1 means strictly even spacing. Override via Config.RateBurst.
+const DefaultRateBurst = 1
 
 // Well-known base URLs for the NAV Online Számla API.
 const (
@@ -26,6 +37,7 @@ const (
 // manageInvoice and manageAnnulment.
 const MaxBatchSize = 100
 
+// TODO: refactor with cleaner config handling with default values and validation, etc
 // Config carries the credentials and runtime knobs required by Client.
 type Config struct {
 	// BaseURL points at either ProductionBaseURL or TestBaseURL. Must be
@@ -61,11 +73,30 @@ type Config struct {
 	// response body via slog.Default(). Use only locally — bodies
 	// include the signed envelope and (decoded) responses.
 	Debug bool
+
+	// RateLimit caps outbound requests to NAV at this many per second.
+	// NAV throttles clients that exceed roughly one request per second;
+	// the default (DefaultRateLimit = 1.0) matches that. Set to a
+	// higher value if NAV later raises the ceiling for your account.
+	// Ignored when DisableRateLimit=true.
+	RateLimit float64
+
+	// RateBurst is the maximum burst the limiter allows before
+	// re-spacing. Defaults to DefaultRateBurst (1) — strictly even
+	// spacing. A larger value lets you absorb a small spike before
+	// settling back to the steady rate.
+	RateBurst int
+
+	// DisableRateLimit skips outbound rate limiting entirely. Use in
+	// unit tests where wall-clock waits are noise, or against a
+	// gateway that handles rate limiting upstream.
+	DisableRateLimit bool
 }
 
 // Client is the NAV Online Számla v3.0 API client.
 type Client struct {
-	cfg Config
+	cfg     Config
+	limiter *rate.Limiter // nil when DisableRateLimit=true
 }
 
 // Token is an exchange token returned by /tokenExchange.
@@ -114,7 +145,20 @@ func NewClient(cfg Config) (*Client, error) {
 		cfg.Clock = time.Now
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
-	return &Client{cfg: cfg}, nil
+
+	c := &Client{cfg: cfg}
+	if !cfg.DisableRateLimit {
+		r := cfg.RateLimit
+		if r <= 0 {
+			r = DefaultRateLimit
+		}
+		burst := cfg.RateBurst
+		if burst <= 0 {
+			burst = DefaultRateBurst
+		}
+		c.limiter = rate.NewLimiter(rate.Limit(r), burst)
+	}
+	return c, nil
 }
 
 func stripNonDigits(s string) string {
@@ -312,6 +356,17 @@ func (c *Client) do(ctx context.Context, path string, req any, out any) error {
 	}
 	httpReq.Header.Set("Content-Type", "application/xml")
 	httpReq.Header.Set("Accept", "application/xml")
+
+	// Block until the rate limiter says we may proceed. Wait honours
+	// ctx cancellation so a long backoff doesn't strand a caller that
+	// has lost interest. Note this enforces per-process spacing only;
+	// multi-replica deployments sharing one NAV technical user
+	// collectively still need coordination above this layer.
+	if c.limiter != nil {
+		if err := c.limiter.Wait(ctx); err != nil {
+			return fmt.Errorf("nav: rate-limit wait: %w", err)
+		}
+	}
 
 	httpResp, err := c.cfg.HTTPClient.Do(httpReq)
 	if err != nil {

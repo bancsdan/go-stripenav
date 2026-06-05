@@ -119,6 +119,13 @@ Implementation details:
   stolen, the store dropped the row, etc.) the lifecycle goroutine
   aborts immediately rather than continuing to write under a stale
   claim.
+- **Outbound rate limiting**: every NAV API call goes through a per-
+  client token-bucket limiter at 1 request/second (NAV's documented
+  per-technical-user ceiling) with burst 1. Override via
+  `nav.Config.RateLimit` / `RateBurst`, disable for tests with
+  `DisableRateLimit=true`. The limiter is in-process only; multiple
+  replicas sharing one NAV technical user need coordination at a
+  higher layer (Redis, etc.) to share the budget.
 - **Hungarian calendar dates**: every date field submitted to NAV
   (`invoiceIssueDate`, `invoiceDeliveryDate`, `paymentDate`, the
   `invoiceDeliveryPeriodStart/End` pair) is rendered in a fixed UTC+2
