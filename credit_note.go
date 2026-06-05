@@ -9,12 +9,18 @@ import (
 
 // invoiceAsStorno clones the Stripe invoice into the shape MapInvoice
 // needs for a STORNO operation: a new invoice number (so NAV does not
-// reject the document as a duplicate of the original) and sign-flipped
-// line amounts so the resulting InvoiceData carries the negative
-// totals NAV expects for a reversing invoice.
-func invoiceAsStorno(inv *stripe.Invoice) *stripe.Invoice {
+// reject the document as a duplicate of the original), an issue date
+// set to `now` (the storno is a NEW invoice with its own issue date —
+// reusing the original's finalize date misrepresents the storno's
+// issuance moment per Áfa tv. §169), and sign-flipped line amounts so
+// the resulting InvoiceData carries the negative totals NAV expects
+// for a reversing invoice.
+func invoiceAsStorno(inv *stripe.Invoice, now time.Time) *stripe.Invoice {
 	clone := *inv
 	clone.Number = inv.Number + "-STORNO"
+	clone.StatusTransitions = &stripe.InvoiceStatusTransitions{
+		FinalizedAt: now.Unix(),
+	}
 	if inv.Lines != nil {
 		out := make([]*stripe.InvoiceLineItem, 0, len(inv.Lines.Data))
 		for _, l := range inv.Lines.Data {

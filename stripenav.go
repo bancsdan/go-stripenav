@@ -309,7 +309,7 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 			ExchangeRateToHUF: rate,
 		}
 	case "invoice.voided", "invoice.marked_uncollectible":
-		invForMap = invoiceAsStorno(inv)
+		invForMap = invoiceAsStorno(inv, h.cfg.Clock())
 		op = "STORNO"
 		opts = mapping.MapOptions{
 			Supplier:              h.cfg.Supplier,
