@@ -119,17 +119,17 @@ func TestWorker_HappyPath(t *testing.T) {
 	}
 }
 
-// TestWorker_24HourDeadline: row issued >24h ago is aborted immediately
-// without any NAV call.
-func TestWorker_24HourDeadline(t *testing.T) {
-	issued := time.Date(2026, 5, 26, 8, 0, 0, 0, time.UTC)
-	clockNow := issued.Add(25 * time.Hour)
+// TestWorker_PastDeadlineKeepsRetrying: a row issued >24h ago is still
+// worked — late reporting is legally required and beats abandoning the
+// submission. The deadline produces a warning + metric, never an abort.
+func TestWorker_PastDeadlineKeepsRetrying(t *testing.T) {
+	issued := time.Now().UTC().Add(-25 * time.Hour)
 	client := &fakeNAVClient{
 		submitFn: func(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
-			return nav.SubmitResult{}, errors.New("must not be called")
+			return nav.SubmitResult{TransactionID: "T-LATE"}, nil
 		},
 	}
-	w, store := newTestWorker(t, client, func() time.Time { return clockNow })
+	w, store := newTestWorker(t, client, time.Now)
 
 	if err := store.Put(context.Background(), stripenav.Submission{
 		EventID:       "evt_late",
@@ -137,7 +137,7 @@ func TestWorker_24HourDeadline(t *testing.T) {
 		Status:        stripenav.StatusPending,
 		IssuedAt:      issued,
 		CreatedAt:     issued,
-		NextAttemptAt: time.Now().Add(-time.Second), // due now in real time
+		NextAttemptAt: time.Now().Add(-time.Second),
 		RawEvent:      sampleInvoiceData(),
 	}); err != nil {
 		t.Fatal(err)
@@ -146,14 +146,11 @@ func TestWorker_24HourDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := store.Get(context.Background(), "evt_late")
-	if got.Status != stripenav.StatusAborted {
-		t.Fatalf("expected aborted, got %s", got.Status)
+	if got.Status != stripenav.StatusAccepted {
+		t.Fatalf("status = %s, want accepted (overdue submissions must still be reported)", got.Status)
 	}
-	if !strings.Contains(got.LastError, "24-hour") {
-		t.Fatalf("expected deadline error, got %q", got.LastError)
-	}
-	if atomic.LoadInt32(&client.submitCalls) != 0 {
-		t.Fatalf("expected zero NAV calls, got %d", client.submitCalls)
+	if atomic.LoadInt32(&client.submitCalls) != 1 {
+		t.Fatalf("SubmitInvoice calls = %d, want 1", client.submitCalls)
 	}
 }
 

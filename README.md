@@ -145,8 +145,12 @@ Implementation details:
   tzdata lookup — keeps the binary self-contained.
 - **Parent dependency tracking**: a STORNO submission waits for its
   parent CREATE to be `accepted` on NAV's side before submitting.
-- **24-hour deadline**: submissions that miss it transition to `aborted`
-  with an error-level log.
+- **24-hour deadline alarm**: submissions that cross NAV's reporting
+  window are NOT abandoned — late reporting is still legally required
+  and beats never reporting. The worker keeps retrying and emits a
+  Warn log plus a `deadline_exceeded` metric event so operators learn
+  about the compliance breach (possible NAV default penalty) while the
+  row keeps being worked.
 - **Inclusive- and exclusive-tax pricing**: handled per Stripe line item.
   When `taxes[].tax_behavior=inclusive` (Stripe Tax's default for
   consumer-facing prices), `line.amount` is treated as the gross and

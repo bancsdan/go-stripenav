@@ -38,6 +38,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
+- Submissions past the 24-hour NAV reporting deadline are no longer
+  aborted: late reporting is still legally required (and beats never
+  reporting), so the worker keeps retrying and instead emits a Warn log
+  plus a `deadline_exceeded` metric event. `StatusAborted` now only
+  arises from the parent-failed path.
 - `SubmissionStore.Put` should wrap the new `stripenav.ErrAlreadyExists`
   for duplicate event ids; the bundled in-memory store does.
 - `WorkerConfig.Supplier` removed (was never read).

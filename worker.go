@@ -25,7 +25,15 @@ const (
 	DefaultBaseBackoff   = 30 * time.Second
 	DefaultMaxBackoff    = 15 * time.Minute
 	DefaultBatchLimit    = 50
-	ReportingDeadline    = 24 * time.Hour
+
+	// ReportingDeadline is NAV's data-reporting window. Crossing it does
+	// NOT stop the worker: late reporting is still legally required (and
+	// strictly better than none — only a default-penalty exposure), so
+	// overdue submissions keep retrying. The worker emits a Warn log and
+	// a "deadline_exceeded" metric event when a still-unreported
+	// submission crosses this threshold, so operators learn about the
+	// compliance breach while the bridge keeps working the row.
+	ReportingDeadline = 24 * time.Hour
 )
 
 // MetricsRecorder receives per-submission outcomes and per-call latency.
@@ -329,20 +337,23 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 	}()
 
 	sub := initial
+	deadlineWarned := false
 	for {
 		if leaseCtx.Err() != nil {
 			return
 		}
 
-		if !sub.IssuedAt.IsZero() && w.clock().Sub(sub.IssuedAt) > ReportingDeadline {
-			w.updateStatus(leaseCtx, sub.EventID, func(s *Submission) error {
-				s.LastError = "24-hour NAV reporting deadline elapsed"
-				return s.Transition(StatusAborted)
-			})
-			w.metrics.RecordSubmissionResult(string(StatusAborted))
-			w.logger.Error("stripenav: submission deadline elapsed",
-				"event_id", sub.EventID, "invoice_number", sub.InvoiceNumber)
-			return
+		// Crossing the reporting deadline is an alarm, not a stop: late
+		// reporting is still mandatory and beats abandoning the row.
+		// Warn once per claim (re-claims after long backoffs warn again,
+		// which keeps the breach visible without per-poll spam).
+		if !deadlineWarned && sub.Status == StatusPending &&
+			!sub.IssuedAt.IsZero() && w.clock().Sub(sub.IssuedAt) > ReportingDeadline {
+			deadlineWarned = true
+			w.metrics.RecordSubmissionResult("deadline_exceeded")
+			w.logger.Warn("stripenav: submission past the 24-hour NAV reporting deadline; continuing to retry — late reporting is still required, expect possible NAV default penalty",
+				"event_id", sub.EventID, "invoice_number", sub.InvoiceNumber,
+				"issued_at", sub.IssuedAt, "attempts", sub.Attempts, "last_error", sub.LastError)
 		}
 
 		switch sub.Status {
