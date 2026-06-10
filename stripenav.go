@@ -335,9 +335,10 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 	}
 
 	var (
-		invForMap *stripe.Invoice
-		opts      invoicemap.MapOptions
-		op        string
+		invForMap  *stripe.Invoice
+		opts       invoicemap.MapOptions
+		op         string
+		parentRate string
 	)
 	switch event.Type {
 	case "invoice.finalized":
@@ -363,20 +364,30 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 		// Record the dependency on the prior CREATE so the worker can
 		// wait for NAV to finish processing it before submitting this
 		// storno. NAV rejects stornos whose original is still in
-		// PROCESSING / SAVED state.
-		if parent := findParentSubmission(ctx, h.cfg.Store, inv.Number); parent != "" {
-			sub.ParentEventID = parent
+		// PROCESSING / SAVED state. The parent's mapped payload also
+		// carries the exchange rate the original was reported with.
+		if parent, ok := findParentSubmission(ctx, h.cfg.Store, inv.Number); ok {
+			sub.ParentEventID = parent.EventID
+			if !strings.EqualFold(string(inv.Currency), "HUF") {
+				parentRate = exchangeRateFromMapped(parent.RawEvent)
+			}
 		}
 	default:
 		return permanent(fmt.Errorf("stripenav: unexpected invoice event %q", event.Type))
 	}
 
-	// The rate is anchored to the document's issue time: the original's
-	// finalization for a CREATE, "now" for a storno (its own issuance
-	// moment).
-	rate, err := h.rateFor(ctx, string(inv.Currency), stripeInvoiceIssueTime(invForMap, h.cfg.Clock()))
-	if err != nil {
-		return err
+	// A STORNO must reverse the original's HUF amounts exactly, so it
+	// reuses the exchange rate the original CREATE was reported with
+	// whenever the parent submission is available; a fresh rate would
+	// leave a HUF residue across NAV's invoice chain. Otherwise the rate
+	// is anchored to the document's issue time: the original's
+	// finalization for a CREATE, "now" for a parentless storno.
+	rate := parentRate
+	if rate == "" {
+		rate, err = h.rateFor(ctx, string(inv.Currency), stripeInvoiceIssueTime(invForMap, h.cfg.Clock()))
+		if err != nil {
+			return err
+		}
 	}
 	opts.ExchangeRateToHUF = rate
 
@@ -431,16 +442,28 @@ func stripeInvoiceIssueTime(inv *stripe.Invoice, fallback time.Time) time.Time {
 
 // findParentSubmission looks up a previously-recorded submission whose
 // InvoiceNumber matches the given (original, un-suffixed) invoice
-// number. Returns its EventID or "" if none exists / lookup fails. We
-// never block dispatch on lookup errors — a missing parent just means
-// "no synthetic ordering"; NAV's response will tell us if the original
-// is actually unknown.
-func findParentSubmission(ctx context.Context, store SubmissionStore, invoiceNumber string) string {
+// number. We never block dispatch on lookup errors — a missing parent
+// just means "no synthetic ordering, no recoverable original rate";
+// NAV's response will tell us if the original is actually unknown.
+func findParentSubmission(ctx context.Context, store SubmissionStore, invoiceNumber string) (Submission, bool) {
 	rows, err := store.FindByInvoiceNumber(ctx, invoiceNumber)
 	if err != nil || len(rows) == 0 {
+		return Submission{}, false
+	}
+	return rows[0], true
+}
+
+// exchangeRateFromMapped extracts the <exchangeRate> a previously mapped
+// InvoiceData payload was reported with. Returns "" when the payload
+// doesn't parse (e.g. a custom Derive flow stored something else).
+func exchangeRateFromMapped(raw []byte) string {
+	var doc struct {
+		ExchangeRate string `xml:"invoiceMain>invoice>invoiceHead>invoiceDetail>exchangeRate"`
+	}
+	if err := xml.Unmarshal(raw, &doc); err != nil {
 		return ""
 	}
-	return rows[0].EventID
+	return strings.TrimSpace(doc.ExchangeRate)
 }
 
 // AnnulInvoice submits a NAV manageAnnulment for an invoice number this

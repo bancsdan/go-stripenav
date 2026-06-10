@@ -85,3 +85,31 @@ func TestInvoiceAsStorno_PreservesTaxBehavior(t *testing.T) {
 		t.Errorf("tax amounts = %d/%d, want sign-flipped -270000/-1000000", tax.Amount, tax.TaxableAmount)
 	}
 }
+
+// TestClones_PreserveHasMore pins that both clone helpers carry the
+// Stripe pagination flag through, so the mapper's truncated-lines guard
+// fires for stornos and credit notes exactly as it does for CREATEs.
+func TestClones_PreserveHasMore(t *testing.T) {
+	inv := &stripe.Invoice{
+		Number:            "2026/00003",
+		StatusTransitions: &stripe.InvoiceStatusTransitions{FinalizedAt: time.Now().Unix()},
+		Lines: &stripe.InvoiceLineItemList{
+			ListMeta: stripe.ListMeta{HasMore: true},
+			Data:     []*stripe.InvoiceLineItem{{Description: "x", Amount: 100, Quantity: 1}},
+		},
+	}
+	if clone := invoiceAsStorno(inv, time.Now()); !clone.Lines.HasMore {
+		t.Errorf("invoiceAsStorno dropped Lines.HasMore")
+	}
+
+	cn := &stripe.CreditNote{
+		Number: "CN-1",
+		Lines: &stripe.CreditNoteLineItemList{
+			ListMeta: stripe.ListMeta{HasMore: true},
+			Data:     []*stripe.CreditNoteLineItem{{Description: "x", Amount: 100, Quantity: 1}},
+		},
+	}
+	if synth := creditNoteAsInvoice(cn); !synth.Lines.HasMore {
+		t.Errorf("creditNoteAsInvoice dropped Lines.HasMore")
+	}
+}

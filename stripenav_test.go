@@ -625,3 +625,76 @@ func TestHandler_PermanentMappingFailureReturns200(t *testing.T) {
 		t.Fatalf("unmappable event must not be persisted, Get err = %v", err)
 	}
 }
+
+// TestHandler_StornoReusesOriginalExchangeRate pins that a foreign-
+// currency STORNO is reported with the exchange rate its original
+// CREATE used — not a fresh provider quote — so the reversal cancels
+// the original's HUF amounts exactly in NAV's invoice chain.
+func TestHandler_StornoReusesOriginalExchangeRate(t *testing.T) {
+	currentRate := "400"
+	cfg := stripenav.Config{
+		StripeWebhookSecret: "whsec_test",
+		NAV: nav.Config{
+			BaseURL: "https://example/v3", Login: "u", Password: "p", TaxNumber: "11111111",
+			SignKey: "k", ExchangeKey: "0123456789ABCDEF",
+			Software: nav.Software{ID: "SW", Name: "n", Operation: "LOCAL_SOFTWARE"},
+		},
+		Supplier: mapping.Supplier{
+			TaxNumber: "12345678-9-01",
+			Name:      "Test Merchant Kft.",
+			Address:   mapping.Address{CountryCode: "HU", PostalCode: "1011", City: "Budapest", AdditionalDetail: "Fő utca 1."},
+		},
+		ExchangeRateProvider: func(context.Context, string, time.Time) (string, error) {
+			return currentRate, nil
+		},
+		Store:         storeinmem.New(),
+		DisableWorker: true,
+	}
+	h, err := stripenav.Handler(cfg, stripenav.WithNAVClient(&fakeNAVClient{}))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	deliver := func(payload []byte) {
+		t.Helper()
+		sig := signStripeWebhook(payload, cfg.StripeWebhookSecret, time.Now())
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+		req.Header.Set("Stripe-Signature", sig)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", w.Code, w.Body)
+		}
+	}
+
+	eurInvoice := func(id, typ string) []byte {
+		inv := map[string]any{
+			"id": "in_" + id, "object": "invoice", "number": "2026-FX1", "currency": "eur",
+			"status_transitions": map[string]any{"finalized_at": time.Now().Add(-time.Hour).Unix()},
+			"lines": map[string]any{
+				"data": []map[string]any{
+					{"description": "Service", "amount": 10_000, "quantity": 1,
+						"taxes": []map[string]any{{"amount": 2_700}}},
+				},
+			},
+		}
+		return marshalEvent(t, "evt_"+id, typ, inv)
+	}
+
+	deliver(eurInvoice("fx_create", "invoice.finalized"))
+
+	// The market moves before the void arrives.
+	currentRate = "410"
+	deliver(eurInvoice("fx_void", "invoice.voided"))
+
+	storno, err := cfg.Store.Get(context.Background(), "evt_fx_void")
+	if err != nil {
+		t.Fatalf("storno not persisted: %v", err)
+	}
+	if !bytes.Contains(storno.RawEvent, []byte("<exchangeRate>400.000000</exchangeRate>")) {
+		t.Fatalf("storno must reuse the original's rate 400, payload:\n%s", storno.RawEvent)
+	}
+	if storno.ParentEventID != "evt_fx_create" {
+		t.Errorf("ParentEventID = %q, want evt_fx_create", storno.ParentEventID)
+	}
+}

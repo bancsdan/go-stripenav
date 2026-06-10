@@ -49,7 +49,10 @@ func invoiceAsStorno(inv *stripe.Invoice, now time.Time) *stripe.Invoice {
 				Taxes:       taxes,
 			})
 		}
-		clone.Lines = &stripe.InvoiceLineItemList{Data: out}
+		// Carry ListMeta (HasMore in particular) so the mapper's
+		// truncated-lines guard applies to the storno exactly as it does
+		// to the original CREATE.
+		clone.Lines = &stripe.InvoiceLineItemList{ListMeta: inv.Lines.ListMeta, Data: out}
 	}
 	return &clone
 }
@@ -82,6 +85,9 @@ func creditNoteAsInvoice(cn *stripe.CreditNote) *stripe.Invoice {
 		},
 	}
 	if cn.Lines != nil {
+		// Carry HasMore so the mapper's truncated-lines guard applies to
+		// credit notes too (Stripe embeds only the first page of lines).
+		inv.Lines.ListMeta = cn.Lines.ListMeta
 		for _, l := range cn.Lines.Data {
 			if l == nil {
 				continue
