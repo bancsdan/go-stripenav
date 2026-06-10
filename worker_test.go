@@ -310,6 +310,45 @@ func TestWorker_LostLeaseStopsLifecycle(t *testing.T) {
 	}
 }
 
+// TestWorker_TransportErrorRetries: a non-NAVError (network blip, DNS,
+// TLS handshake fail, http.Client timeout) must keep the row in pending
+// with a future NextAttemptAt — it must NOT terminally reject. The
+// structured NAVError carries its own retriability; transport errors
+// don't, so the worker defaults them to retriable.
+func TestWorker_TransportErrorRetries(t *testing.T) {
+	client := &fakeNAVClient{
+		submitFn: func(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
+			return nav.SubmitResult{}, errors.New("dial tcp: connection refused")
+		},
+	}
+	w, store := newTestWorker(t, client, time.Now)
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), stripenav.Submission{
+		EventID:       "evt_net",
+		Kind:          stripenav.KindInvoice,
+		Status:        stripenav.StatusPending,
+		IssuedAt:      now,
+		CreatedAt:     now,
+		NextAttemptAt: now.Add(-time.Second),
+		RawEvent:      sampleInvoiceData(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.Get(context.Background(), "evt_net")
+	if got.Status != stripenav.StatusPending {
+		t.Fatalf("status = %s, want pending (transport error should retry, not reject)", got.Status)
+	}
+	if got.Attempts != 1 {
+		t.Errorf("Attempts = %d, want 1", got.Attempts)
+	}
+	if !got.NextAttemptAt.After(time.Now()) {
+		t.Errorf("NextAttemptAt = %s, expected a future retry time", got.NextAttemptAt)
+	}
+}
+
 // TestWorker_NonRetriableErrorRejects: first attempt fails with a
 // non-retriable error → row moves to rejected immediately.
 func TestWorker_NonRetriableErrorRejects(t *testing.T) {

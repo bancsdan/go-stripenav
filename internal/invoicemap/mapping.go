@@ -350,7 +350,7 @@ func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operatio
 			// single line (it's driven by the Price config), so checking
 			// any tax is sufficient. inclusive means l.Amount is gross
 			// (price-includes-VAT, B2C default); exclusive means net.
-			if string(tx.TaxBehavior) == "inclusive" {
+			if tx.TaxBehavior == stripe.InvoiceLineItemTaxTaxBehaviorInclusive {
 				inclusive = true
 			}
 		}

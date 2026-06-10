@@ -86,7 +86,14 @@ func creditNoteAsInvoice(cn *stripe.CreditNote) *stripe.Invoice {
 				if ta == nil {
 					continue
 				}
-				taxes = append(taxes, &stripe.InvoiceLineItemTax{Amount: ta.Amount, TaxableAmount: ta.TaxableAmount})
+				// Tax amounts share the line's sign; if we flip the
+				// amount we must flip the tax too, otherwise the derived
+				// VAT rate (vat/net) ends up negative and NAV rejects.
+				taxes = append(taxes, &stripe.InvoiceLineItemTax{
+					Amount:        -ta.Amount,
+					TaxableAmount: -ta.TaxableAmount,
+					TaxBehavior:   stripe.InvoiceLineItemTaxTaxBehavior(ta.TaxBehavior),
+				})
 			}
 			inv.Lines.Data = append(inv.Lines.Data, &stripe.InvoiceLineItem{
 				Description: l.Description,

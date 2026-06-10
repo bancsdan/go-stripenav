@@ -147,6 +147,15 @@ type Store interface {
 	// Implementations MUST return claimed Submissions with their
 	// ClaimedBy and ClaimedUntil fields populated to reflect the
 	// just-applied claim.
+	//
+	// Implementations MUST NOT return rows that are currently held under
+	// a valid lease — even when the existing holder matches the caller's
+	// claimer id. Allowing a worker to re-claim its own active rows would
+	// spawn duplicate lifecycle goroutines for the same submission; the
+	// first lifecycle's ReleaseClaim would then race the second's
+	// RenewClaim and trip a spurious "claim lost" error. A Postgres
+	// adapter built on SELECT … FOR UPDATE SKIP LOCKED is naturally
+	// immune; an in-process implementation must guard explicitly.
 	ClaimBatch(ctx context.Context, claimer string, limit int, lease time.Duration) ([]Submission, error)
 
 	// RenewClaim extends the lease on a previously-claimed row. Returns

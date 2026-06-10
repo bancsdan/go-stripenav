@@ -48,11 +48,11 @@ type commonHeaderXML struct {
 
 // commonUserXML renders the <common:user> block.
 type commonUserXML struct {
-	XMLName          xml.Name           `xml:"common:user"`
-	Login            string             `xml:"common:login"`
-	PasswordHash     passwordHashXML    `xml:"common:passwordHash"`
-	TaxNumber        string             `xml:"common:taxNumber"`
-	RequestSignature requestSigXML      `xml:"common:requestSignature"`
+	XMLName          xml.Name        `xml:"common:user"`
+	Login            string          `xml:"common:login"`
+	PasswordHash     passwordHashXML `xml:"common:passwordHash"`
+	TaxNumber        string          `xml:"common:taxNumber"`
+	RequestSignature requestSigXML   `xml:"common:requestSignature"`
 }
 
 type passwordHashXML struct {

@@ -1,6 +1,7 @@
 package stripenav
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -77,8 +78,8 @@ type Worker struct {
 	maxBackoff    time.Duration
 	batchLimit    int
 
-	wakeup       chan struct{}
-	lifecycleWG  sync.WaitGroup
+	wakeup      chan struct{}
+	lifecycleWG sync.WaitGroup
 
 	// derive lets the test inject a custom payload derivation for an
 	// event. In production it is nil and the worker reads the persisted
@@ -224,13 +225,22 @@ func (w *Worker) ClaimerID() string { return w.claimerID }
 // lifecycle goroutines to drain.
 func (w *Worker) Run(ctx context.Context) error {
 	defer w.lifecycleWG.Wait()
+	// Reuse a single timer rather than per-iteration time.After so a
+	// stream of wakeup signals doesn't accumulate timers in the runtime
+	// heap until each one fires.
+	timer := time.NewTimer(w.maxSleep)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-w.wakeup:
-		case <-time.After(w.maxSleep):
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
 		}
+		timer.Reset(w.maxSleep)
 		if err := w.claimAndProcess(ctx, &w.lifecycleWG); err != nil && !errors.Is(err, context.Canceled) {
 			w.logger.Error("stripenav: claim batch failed", "err", err)
 		}
@@ -451,8 +461,12 @@ func (w *Worker) attemptSubmit(ctx context.Context, sub Submission) {
 	w.metrics.RecordLatency("submit", w.clock().Sub(start))
 
 	if txErr != nil {
+		// Default to retriable for unknown errors (network blips, DNS,
+		// TLS, http.Client timeouts) so a transient transport failure
+		// doesn't terminally reject a submission. Only a *nav.NAVError
+		// carries a structured retriable decision; honour it when present.
 		var navErr *nav.NAVError
-		retriable := false
+		retriable := true
 		if errors.As(txErr, &navErr) {
 			retriable = navErr.IsRetriable()
 		}
@@ -584,13 +598,16 @@ func (w *Worker) backoffFor(attempts int) time.Duration {
 		attempts = 1
 	}
 	delay := base * powInt(2, attempts-1)
-	if delay > max {
-		delay = max
-	}
 	w.rngMu.Lock()
 	jitter := 0.8 + w.rng.Float64()*0.4 // ±20%
 	w.rngMu.Unlock()
-	return time.Duration(delay * jitter)
+	delay *= jitter
+	// Cap after applying jitter so the actual delay never exceeds
+	// MaxBackoff — capping first would let 1.2× jitter push us over.
+	if delay > max {
+		delay = max
+	}
+	return time.Duration(delay)
 }
 
 func powInt(base float64, exp int) float64 {
@@ -629,12 +646,16 @@ func (w *Worker) deriveForRetry(sub Submission) (operation string, invoiceData [
 }
 
 func xmlLooksLike(b []byte, root string) bool {
-	type any struct {
-		XMLName xml.Name
+	// Stream the document until the first StartElement; checking just
+	// the root name avoids the cost of parsing the full body.
+	dec := xml.NewDecoder(bytes.NewReader(b))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if se, ok := tok.(xml.StartElement); ok {
+			return se.Name.Local == root
+		}
 	}
-	var a any
-	if err := xml.Unmarshal(b, &a); err != nil {
-		return false
-	}
-	return a.XMLName.Local == root
 }
