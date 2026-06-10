@@ -1,12 +1,11 @@
 package navclient
 
 import (
+	"crypto/sha3"
 	"crypto/sha512"
 	"encoding/hex"
 	"strings"
 	"testing"
-
-	"golang.org/x/crypto/sha3"
 )
 
 func TestPasswordHash(t *testing.T) {

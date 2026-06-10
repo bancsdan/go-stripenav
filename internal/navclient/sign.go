@@ -1,11 +1,10 @@
 package navclient
 
 import (
+	"crypto/sha3"
 	"crypto/sha512"
 	"encoding/hex"
 	"strings"
-
-	"golang.org/x/crypto/sha3"
 )
 
 // SignedOperation describes a per-operation contribution to a manageInvoice
