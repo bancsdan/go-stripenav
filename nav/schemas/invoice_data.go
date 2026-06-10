@@ -59,9 +59,9 @@ type CustomerInfo struct {
 }
 
 type CustomerVatData struct {
-	CustomerTaxNumber       *TaxNumberType         `xml:"customerTaxNumber,omitempty"`
-	CommunityVatNumber      string                 `xml:"communityVatNumber,omitempty"`
-	ThirdStateTaxID         string                 `xml:"thirdStateTaxId,omitempty"`
+	CustomerTaxNumber  *TaxNumberType `xml:"customerTaxNumber,omitempty"`
+	CommunityVatNumber string         `xml:"communityVatNumber,omitempty"`
+	ThirdStateTaxID    string         `xml:"thirdStateTaxId,omitempty"`
 }
 
 // TaxNumberType is the Hungarian 11-digit VAT number split into the three
@@ -81,21 +81,25 @@ type Address struct {
 }
 
 type SimpleAddress struct {
-	CountryCode      string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base countryCode"`
-	Region           string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base region,omitempty"`
-	PostalCode       string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base postalCode"`
-	City             string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base city"`
-	AdditionalAddress string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base additionalAddressDetail"`
+	CountryCode string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base countryCode"`
+	Region      string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base region,omitempty"`
+	PostalCode  string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base postalCode"`
+	City        string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base city"`
+	// AdditionalAddress is required and non-blank in NAV's schema when a
+	// simpleAddress is present; the mapper guarantees it is set.
+	// omitempty is defence in depth: a missing element produces a
+	// clearer NAV validation error than a blank one.
+	AdditionalAddress string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base additionalAddressDetail,omitempty"`
 }
 
 type DetailedAddress struct {
-	CountryCode        string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base countryCode"`
-	Region             string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base region,omitempty"`
-	PostalCode         string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base postalCode"`
-	City               string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base city"`
-	StreetName         string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base streetName"`
+	CountryCode         string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base countryCode"`
+	Region              string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base region,omitempty"`
+	PostalCode          string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base postalCode"`
+	City                string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base city"`
+	StreetName          string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base streetName"`
 	PublicPlaceCategory string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base publicPlaceCategory"`
-	Number             string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base number,omitempty"`
+	Number              string `xml:"http://schemas.nav.gov.hu/OSA/3.0/base number,omitempty"`
 }
 
 type InvoiceDetail struct {
@@ -120,18 +124,18 @@ type InvoiceLines struct {
 }
 
 type Line struct {
-	LineNumber              int             `xml:"lineNumber"`
+	LineNumber                int                        `xml:"lineNumber"`
 	LineModificationReference *LineModificationReference `xml:"lineModificationReference,omitempty"`
-	LineExpressionIndicator bool            `xml:"lineExpressionIndicator"`
-	LineNatureIndicator     string          `xml:"lineNatureIndicator,omitempty"` // PRODUCT, SERVICE, OTHER
-	LineDescription         string          `xml:"lineDescription"`
-	Quantity                string          `xml:"quantity,omitempty"`
-	UnitOfMeasure           string          `xml:"unitOfMeasure,omitempty"`
-	UnitOfMeasureOwn        string          `xml:"unitOfMeasureOwn,omitempty"`
-	UnitPrice               string          `xml:"unitPrice,omitempty"`
-	UnitPriceHUF            string          `xml:"unitPriceHUF,omitempty"`
-	LineAmountsNormal       *LineAmounts    `xml:"lineAmountsNormal,omitempty"`
-	LineAmountsSimplified   *LineAmountsSimplified `xml:"lineAmountsSimplified,omitempty"`
+	LineExpressionIndicator   bool                       `xml:"lineExpressionIndicator"`
+	LineNatureIndicator       string                     `xml:"lineNatureIndicator,omitempty"` // PRODUCT, SERVICE, OTHER
+	LineDescription           string                     `xml:"lineDescription"`
+	Quantity                  string                     `xml:"quantity,omitempty"`
+	UnitOfMeasure             string                     `xml:"unitOfMeasure,omitempty"`
+	UnitOfMeasureOwn          string                     `xml:"unitOfMeasureOwn,omitempty"`
+	UnitPrice                 string                     `xml:"unitPrice,omitempty"`
+	UnitPriceHUF              string                     `xml:"unitPriceHUF,omitempty"`
+	LineAmountsNormal         *LineAmounts               `xml:"lineAmountsNormal,omitempty"`
+	LineAmountsSimplified     *LineAmountsSimplified     `xml:"lineAmountsSimplified,omitempty"`
 }
 
 type LineModificationReference struct {
@@ -140,16 +144,16 @@ type LineModificationReference struct {
 }
 
 type LineAmounts struct {
-	LineNetAmountData LineNetAmount  `xml:"lineNetAmountData"`
-	LineVatRate       LineVatRate    `xml:"lineVatRate"`
-	LineVatData       *LineVatAmount `xml:"lineVatData,omitempty"`
+	LineNetAmountData   LineNetAmount    `xml:"lineNetAmountData"`
+	LineVatRate         LineVatRate      `xml:"lineVatRate"`
+	LineVatData         *LineVatAmount   `xml:"lineVatData,omitempty"`
 	LineGrossAmountData *LineGrossAmount `xml:"lineGrossAmountData,omitempty"`
 }
 
 type LineAmountsSimplified struct {
-	LineVatRate              LineVatRate `xml:"lineVatRate"`
-	LineGrossAmountSimplified string     `xml:"lineGrossAmountSimplified"`
-	LineGrossAmountSimplifiedHUF string  `xml:"lineGrossAmountSimplifiedHUF"`
+	LineVatRate                  LineVatRate `xml:"lineVatRate"`
+	LineGrossAmountSimplified    string      `xml:"lineGrossAmountSimplified"`
+	LineGrossAmountSimplifiedHUF string      `xml:"lineGrossAmountSimplifiedHUF"`
 }
 
 type LineNetAmount struct {
@@ -168,11 +172,11 @@ type LineGrossAmount struct {
 }
 
 type LineVatRate struct {
-	VatPercentage    string  `xml:"vatPercentage,omitempty"`
-	VatContent       string  `xml:"vatContent,omitempty"`
-	VatExemption     *VatExemption `xml:"vatExemption,omitempty"`
-	VatOutOfScope    *VatOutOfScope `xml:"vatOutOfScope,omitempty"`
-	NoVatCharge      bool    `xml:"noVatCharge,omitempty"`
+	VatPercentage string         `xml:"vatPercentage,omitempty"`
+	VatContent    string         `xml:"vatContent,omitempty"`
+	VatExemption  *VatExemption  `xml:"vatExemption,omitempty"`
+	VatOutOfScope *VatOutOfScope `xml:"vatOutOfScope,omitempty"`
+	NoVatCharge   bool           `xml:"noVatCharge,omitempty"`
 }
 
 type VatExemption struct {
@@ -186,24 +190,24 @@ type VatOutOfScope struct {
 }
 
 type InvoiceSummary struct {
-	SummaryNormal     *SummaryNormal     `xml:"summaryNormal,omitempty"`
+	SummaryNormal     *SummaryNormal      `xml:"summaryNormal,omitempty"`
 	SummarySimplified []SummarySimplified `xml:"summarySimplified,omitempty"`
-	SummaryGrossData  SummaryGrossData   `xml:"summaryGrossData"`
+	SummaryGrossData  SummaryGrossData    `xml:"summaryGrossData"`
 }
 
 type SummaryNormal struct {
-	SummaryByVatRate     []SummaryByVatRate `xml:"summaryByVatRate"`
-	InvoiceNetAmount     string             `xml:"invoiceNetAmount"`
-	InvoiceNetAmountHUF  string             `xml:"invoiceNetAmountHUF"`
-	InvoiceVatAmount     string             `xml:"invoiceVatAmount"`
-	InvoiceVatAmountHUF  string             `xml:"invoiceVatAmountHUF"`
+	SummaryByVatRate    []SummaryByVatRate `xml:"summaryByVatRate"`
+	InvoiceNetAmount    string             `xml:"invoiceNetAmount"`
+	InvoiceNetAmountHUF string             `xml:"invoiceNetAmountHUF"`
+	InvoiceVatAmount    string             `xml:"invoiceVatAmount"`
+	InvoiceVatAmountHUF string             `xml:"invoiceVatAmountHUF"`
 }
 
 type SummaryByVatRate struct {
-	VatRate           LineVatRate         `xml:"vatRate"`
-	VatRateNetData    VatRateNetData      `xml:"vatRateNetData"`
-	VatRateVatData    VatRateVatData      `xml:"vatRateVatData"`
-	VatRateGrossData  VatRateGrossData    `xml:"vatRateGrossData"`
+	VatRate          LineVatRate      `xml:"vatRate"`
+	VatRateNetData   VatRateNetData   `xml:"vatRateNetData"`
+	VatRateVatData   VatRateVatData   `xml:"vatRateVatData"`
+	VatRateGrossData VatRateGrossData `xml:"vatRateGrossData"`
 }
 
 type VatRateNetData struct {

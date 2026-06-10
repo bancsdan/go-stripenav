@@ -18,33 +18,27 @@ var retriableErrorCodes = map[string]bool{
 	"INVALID_VERSION":       false,
 }
 
-func navErrorFromResult(httpStatus int, r schemas.BasicResult) *nav.NAVError {
-	retriable := false
-	if httpStatus >= 500 {
-		retriable = true
-	}
-	if v, ok := retriableErrorCodes[r.ErrorCode]; ok {
+// newNAVError builds the typed error from a status + funcCode/errorCode
+// pair: 5xx defaults to retriable, then the documented per-code list
+// overrides in either direction.
+func newNAVError(httpStatus int, funcCode, code, message string) *nav.NAVError {
+	retriable := httpStatus >= 500
+	if v, ok := retriableErrorCodes[code]; ok {
 		retriable = v
 	}
 	return &nav.NAVError{
 		HTTPStatus: httpStatus,
-		FuncCode:   r.FuncCode,
-		Code:       r.ErrorCode,
-		Message:    r.Message,
+		FuncCode:   funcCode,
+		Code:       code,
+		Message:    message,
 		Retriable:  retriable,
 	}
 }
 
+func navErrorFromResult(httpStatus int, r schemas.BasicResult) *nav.NAVError {
+	return newNAVError(httpStatus, r.FuncCode, r.ErrorCode, r.Message)
+}
+
 func navErrorFromException(httpStatus int, e schemas.GeneralExceptionResponse) *nav.NAVError {
-	retriable := httpStatus >= 500
-	if v, ok := retriableErrorCodes[e.ErrorCode]; ok {
-		retriable = v
-	}
-	return &nav.NAVError{
-		HTTPStatus: httpStatus,
-		FuncCode:   e.FuncCode,
-		Code:       e.ErrorCode,
-		Message:    e.Message,
-		Retriable:  retriable,
-	}
+	return newNAVError(httpStatus, e.FuncCode, e.ErrorCode, e.Message)
 }

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	stripenav "github.com/bancsdan/go-stripenav"
+	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
-	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 )
 
 // fakeNAVClient is a configurable NAVClient for unit tests.
@@ -307,6 +307,79 @@ func TestWorker_LostLeaseStopsLifecycle(t *testing.T) {
 	}
 	if got.TransactionID != "" {
 		t.Errorf("TransactionID = %q, want empty (no successful submit)", got.TransactionID)
+	}
+}
+
+// TestWorker_PollTransientFailureBacksOffWithoutResubmit: submit
+// succeeds, then queryTransactionStatus fails with a retriable error.
+// The row must stay submitted with a future NextAttemptAt (backoff in
+// place, transactionId retained) — not hot-loop on a past-due
+// NextAttemptAt, and NOT requeue to pending, which would re-submit the
+// invoice and create a duplicate on NAV's side.
+func TestWorker_PollTransientFailureBacksOffWithoutResubmit(t *testing.T) {
+	var statusCalls int32
+	client := &fakeNAVClient{
+		submitFn: func(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
+			return nav.SubmitResult{TransactionID: "T-POLL"}, nil
+		},
+		statusFn: func(ctx context.Context, tx string, _ bool) (schemas.QueryTransactionStatusResponse, error) {
+			if atomic.AddInt32(&statusCalls, 1) == 1 {
+				return schemas.QueryTransactionStatusResponse{},
+					&nav.NAVError{HTTPStatus: 500, Code: "INTERNAL_ERROR", Retriable: true, Message: "nav hiccup"}
+			}
+			return schemas.QueryTransactionStatusResponse{
+				ProcessingResults: schemas.ProcessingResults{
+					ProcessingResult: []schemas.ProcessingResult{{Index: 1, InvoiceStatus: "FINISHED"}},
+				},
+			}, nil
+		},
+	}
+	w, store := newTestWorker(t, client, time.Now)
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), stripenav.Submission{
+		EventID:       "evt_poll_fail",
+		Kind:          stripenav.KindInvoice,
+		Status:        stripenav.StatusPending,
+		IssuedAt:      now,
+		CreatedAt:     now,
+		NextAttemptAt: now.Add(-time.Second),
+		RawEvent:      sampleInvoiceData(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.Get(context.Background(), "evt_poll_fail")
+	if got.Status != stripenav.StatusSubmitted {
+		t.Fatalf("status = %s, want submitted (poll failure must back off in place)", got.Status)
+	}
+	if got.TransactionID != "T-POLL" {
+		t.Fatalf("TransactionID = %q, want T-POLL retained", got.TransactionID)
+	}
+	if !got.NextAttemptAt.After(time.Now()) {
+		t.Fatalf("NextAttemptAt = %s, want future (backoff applied)", got.NextAttemptAt)
+	}
+	if !strings.Contains(got.LastError, "nav hiccup") {
+		t.Errorf("LastError = %q, want the poll error recorded", got.LastError)
+	}
+
+	// Bring the retry forward; the worker must resume POLLING the same
+	// transaction, not submit a second time.
+	_ = store.UpdateStatus(context.Background(), "evt_poll_fail", func(s *stripenav.Submission) error {
+		s.NextAttemptAt = time.Now().Add(-time.Second)
+		return nil
+	})
+	if err := w.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.Get(context.Background(), "evt_poll_fail")
+	if got.Status != stripenav.StatusAccepted {
+		t.Fatalf("after retry: status = %s, want accepted", got.Status)
+	}
+	if n := atomic.LoadInt32(&client.submitCalls); n != 1 {
+		t.Fatalf("SubmitInvoice called %d times, want exactly 1 (no duplicate submission)", n)
 	}
 }
 

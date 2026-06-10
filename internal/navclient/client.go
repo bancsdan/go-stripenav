@@ -124,13 +124,22 @@ func (c *Client) ExchangeToken(ctx context.Context) (Token, error) {
 	return Token{Value: plain, ValidFrom: validFrom, ExpiresAt: validTo}, nil
 }
 
+// checkBatch validates the common per-batch constraints shared by
+// SubmitInvoice and AnnulInvoice.
+func checkBatch(n int) error {
+	if n == 0 {
+		return errors.New("nav: at least one operation is required")
+	}
+	if n > nav.MaxBatchSize {
+		return nav.ErrBatchTooLarge
+	}
+	return nil
+}
+
 // SubmitInvoice submits a batch of CREATE/MODIFY/STORNO operations.
 func (c *Client) SubmitInvoice(ctx context.Context, ops []nav.InvoiceOperation) (nav.SubmitResult, error) {
-	if len(ops) == 0 {
-		return nav.SubmitResult{}, errors.New("nav: SubmitInvoice requires at least one operation")
-	}
-	if len(ops) > nav.MaxBatchSize {
-		return nav.SubmitResult{}, nav.ErrBatchTooLarge
+	if err := checkBatch(len(ops)); err != nil {
+		return nav.SubmitResult{}, err
 	}
 	tok, err := c.ExchangeToken(ctx)
 	if err != nil {
@@ -174,11 +183,8 @@ func (c *Client) SubmitInvoice(ctx context.Context, ops []nav.InvoiceOperation) 
 
 // AnnulInvoice submits one or more ANNUL operations.
 func (c *Client) AnnulInvoice(ctx context.Context, ops []nav.AnnulmentOperation) (nav.SubmitResult, error) {
-	if len(ops) == 0 {
-		return nav.SubmitResult{}, errors.New("nav: AnnulInvoice requires at least one operation")
-	}
-	if len(ops) > nav.MaxBatchSize {
-		return nav.SubmitResult{}, nav.ErrBatchTooLarge
+	if err := checkBatch(len(ops)); err != nil {
+		return nav.SubmitResult{}, err
 	}
 	tok, err := c.ExchangeToken(ctx)
 	if err != nil {
@@ -277,7 +283,7 @@ func (c *Client) do(ctx context.Context, path string, req any, out any) error {
 	if err != nil {
 		return fmt.Errorf("nav: http %s: %w", path, err)
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
@@ -328,6 +334,11 @@ func extractBasicResult(body []byte) schemas.BasicResult {
 func trim(b []byte, n int) string {
 	if len(b) <= n {
 		return string(b)
+	}
+	// Back up to a rune boundary so we never split a multibyte
+	// character (NAV messages are Hungarian).
+	for n > 0 && b[n]&0xC0 == 0x80 {
+		n--
 	}
 	return string(b[:n]) + "…"
 }

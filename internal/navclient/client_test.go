@@ -240,7 +240,7 @@ func TestClient_SubmitInvoice_BatchTooLarge(t *testing.T) {
 // configured rate isn't honoured.
 func TestClient_RateLimitSpacesRequests(t *testing.T) {
 	var (
-		mu        sync.Mutex
+		mu         sync.Mutex
 		timestamps []time.Time
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -71,4 +71,23 @@ func TestClassifyCustomer(t *testing.T) {
 			t.Fatalf("private person should have nil vat data, got %+v", vat)
 		}
 	})
+	t.Run("hungarian id wins regardless of list position", func(t *testing.T) {
+		status, vat := classifyCustomer([]taxIDLike{
+			{Type: "us_ein", Value: "12-3456789"},
+			{Type: "eu_vat", Value: "DE123456789"},
+			{Type: "hu_tin", Value: "12345678-9-01"},
+		}, true)
+		if status != CustomerDomestic || vat == nil || vat.CustomerTaxNumber == nil {
+			t.Fatalf("expected DOMESTIC (hu_tin should outrank earlier ids), got status=%v vat=%+v", status, vat)
+		}
+	})
+	t.Run("EU id wins over earlier third-state id", func(t *testing.T) {
+		status, vat := classifyCustomer([]taxIDLike{
+			{Type: "us_ein", Value: "12-3456789"},
+			{Type: "eu_vat", Value: "DE123456789"},
+		}, true)
+		if status != CustomerOther || vat == nil || vat.CommunityVatNumber != "DE123456789" {
+			t.Fatalf("expected OTHER with communityVatNumber (EU outranks third-state), got status=%v vat=%+v", status, vat)
+		}
+	})
 }

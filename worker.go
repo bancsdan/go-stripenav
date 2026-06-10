@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
 )
@@ -61,14 +60,13 @@ type NAVClient interface {
 // processing, releases on exit, and is naturally safe across multiple
 // worker replicas because the store mediates row ownership.
 type Worker struct {
-	store    SubmissionStore
-	client   NAVClient
-	supplier mapping.Supplier
-	logger   *slog.Logger
-	metrics  MetricsRecorder
-	clock    func() time.Time
-	rng      *rand.Rand
-	rngMu    sync.Mutex
+	store   SubmissionStore
+	client  NAVClient
+	logger  *slog.Logger
+	metrics MetricsRecorder
+	clock   func() time.Time
+	rng     *rand.Rand
+	rngMu   sync.Mutex
 
 	claimerID     string
 	maxSleep      time.Duration
@@ -91,12 +89,11 @@ type deriveFn func(eventID string, raw []byte) (operation string, invoiceData []
 
 // WorkerConfig groups all the worker knobs.
 type WorkerConfig struct {
-	Store    SubmissionStore
-	Client   NAVClient
-	Supplier mapping.Supplier
-	Logger   *slog.Logger
-	Metrics  MetricsRecorder
-	Clock    func() time.Time
+	Store   SubmissionStore
+	Client  NAVClient
+	Logger  *slog.Logger
+	Metrics MetricsRecorder
+	Clock   func() time.Time
 
 	// ClaimerID identifies this worker for claim ownership. Defaults to
 	// the process hostname; if that's empty, a random suffix is used.
@@ -174,11 +171,10 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	return &Worker{
 		store:         cfg.Store,
 		client:        cfg.Client,
-		supplier:      cfg.Supplier,
 		logger:        cfg.Logger,
 		metrics:       cfg.Metrics,
 		clock:         cfg.Clock,
-		rng:           rand.New(rand.NewSource(cfg.Clock().UnixNano())),
+		rng:           rand.New(rand.NewSource(cfg.Clock().UnixNano())), //nolint:gosec // G404: backoff jitter needs no cryptographic strength
 		claimerID:     cfg.ClaimerID,
 		maxSleep:      cfg.MaxSleep,
 		pollInterval:  cfg.PollInterval,
@@ -200,7 +196,7 @@ func defaultClaimerID() string {
 	}
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 	var suffix [8]byte
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	r := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // G404: claimer-id suffix needs uniqueness, not unpredictability
 	for i := range suffix {
 		suffix[i] = alphabet[r.Intn(len(alphabet))]
 	}
@@ -218,6 +214,19 @@ func (w *Worker) Wakeup() {
 
 // ClaimerID returns the id this worker uses when claiming submissions.
 func (w *Worker) ClaimerID() string { return w.claimerID }
+
+// updateStatus wraps store.UpdateStatus and logs failures instead of
+// silently discarding them. A failed update means the in-store row did
+// NOT change (storeinmem and SQL implementations roll back on mut
+// error), so dropping the error hides stuck rows — this is exactly how
+// the submitted→pending requeue gap stayed invisible. Context
+// cancellations during shutdown are expected and not logged.
+func (w *Worker) updateStatus(ctx context.Context, eventID string, mut func(*Submission) error) {
+	err := w.store.UpdateStatus(ctx, eventID, mut)
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		w.logger.Error("stripenav: update status failed", "event_id", eventID, "err", err)
+	}
+}
 
 // Run blocks until ctx is cancelled. It scans the store on every
 // wakeup or maxSleep interval, claims a batch, and spawns a lifecycle
@@ -308,7 +317,15 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 		renewDone.Wait()
 		relCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = w.store.ReleaseClaim(relCtx, initial.EventID, w.claimerID)
+		// ErrClaimLost / ErrNotFound here are benign: the lease was
+		// already taken over or the row deleted, which the renew loop
+		// has logged. Anything else (store I/O) is worth surfacing.
+		if err := w.store.ReleaseClaim(relCtx, initial.EventID, w.claimerID); err != nil &&
+			!errors.Is(err, ErrClaimLost) && !errors.Is(err, ErrNotFound) &&
+			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			w.logger.Warn("stripenav: release claim failed",
+				"event_id", initial.EventID, "err", err)
+		}
 	}()
 
 	sub := initial
@@ -318,7 +335,7 @@ func (w *Worker) runLifecycle(ctx context.Context, initial Submission) {
 		}
 
 		if !sub.IssuedAt.IsZero() && w.clock().Sub(sub.IssuedAt) > ReportingDeadline {
-			_ = w.store.UpdateStatus(leaseCtx, sub.EventID, func(s *Submission) error {
+			w.updateStatus(leaseCtx, sub.EventID, func(s *Submission) error {
 				s.LastError = "24-hour NAV reporting deadline elapsed"
 				return s.Transition(StatusAborted)
 			})
@@ -413,7 +430,7 @@ func (w *Worker) parentReady(ctx context.Context, sub Submission) bool {
 	if err != nil {
 		w.logger.Warn("stripenav: parent lookup failed; will retry",
 			"event_id", sub.EventID, "parent_event_id", sub.ParentEventID, "err", err)
-		_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+		w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 			s.NextAttemptAt = w.clock().Add(w.maxSleep)
 			return nil
 		})
@@ -423,7 +440,7 @@ func (w *Worker) parentReady(ctx context.Context, sub Submission) bool {
 	case StatusAccepted:
 		return true
 	case StatusRejected, StatusAborted:
-		_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+		w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 			s.LastError = "parent submission " + parent.EventID + " terminally failed: " + parent.LastError
 			return s.Transition(StatusAborted)
 		})
@@ -432,7 +449,7 @@ func (w *Worker) parentReady(ctx context.Context, sub Submission) bool {
 			"event_id", sub.EventID, "parent_event_id", parent.EventID, "parent_status", parent.Status)
 		return false
 	default:
-		_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+		w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 			s.NextAttemptAt = w.clock().Add(w.maxSleep)
 			return nil
 		})
@@ -474,7 +491,7 @@ func (w *Worker) attemptSubmit(ctx context.Context, sub Submission) {
 		return
 	}
 
-	_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+	w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 		s.TransactionID = res.TransactionID
 		s.LastError = ""
 		s.Attempts++
@@ -485,7 +502,7 @@ func (w *Worker) attemptSubmit(ctx context.Context, sub Submission) {
 
 func (w *Worker) pollStatus(ctx context.Context, sub Submission) {
 	if sub.TransactionID == "" {
-		w.markFailure(ctx, sub, errors.New("submitted submission missing transactionId"), false)
+		w.markPollFailure(ctx, sub, errors.New("submitted submission missing transactionId"), false)
 		return
 	}
 	start := w.clock()
@@ -497,7 +514,7 @@ func (w *Worker) pollStatus(ctx context.Context, sub Submission) {
 		if errors.As(err, &navErr) {
 			retriable = navErr.IsRetriable()
 		}
-		w.markFailure(ctx, sub, err, retriable)
+		w.markPollFailure(ctx, sub, err, retriable)
 		return
 	}
 
@@ -505,7 +522,7 @@ func (w *Worker) pollStatus(ctx context.Context, sub Submission) {
 	switch overall {
 	case "ABORTED":
 		detail := formatValidationMessages(resp)
-		_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+		w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 			if detail != "" {
 				s.LastError = "NAV reported ABORTED: " + detail
 			} else {
@@ -515,14 +532,14 @@ func (w *Worker) pollStatus(ctx context.Context, sub Submission) {
 		})
 		w.metrics.RecordSubmissionResult(string(StatusRejected))
 	case "FINISHED", "DONE":
-		_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+		w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 			s.LastError = ""
 			return s.Transition(StatusAccepted)
 		})
 		w.metrics.RecordSubmissionResult(string(StatusAccepted))
 	default:
 		// RECEIVED, PROCESSING, SAVED, or "" (no results yet) — keep polling.
-		_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+		w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 			s.NextAttemptAt = w.clock().Add(w.pollInterval)
 			return s.Transition(StatusProcessing)
 		})
@@ -556,30 +573,45 @@ func formatValidationMessages(resp schemas.QueryTransactionStatusResponse) strin
 	return strings.Join(parts, "; ")
 }
 
+// overallStatus collapses NAV's per-operation invoiceStatus values into
+// one verdict for the whole transaction: ABORTED if any operation
+// aborted, FINISHED only when every operation is final, otherwise the
+// first still-pending status so the caller keeps polling. Returning a
+// final status while any operation is still in flight would mark the
+// submission accepted prematurely.
 func overallStatus(resp schemas.QueryTransactionStatusResponse) string {
 	prs := resp.ProcessingResults.ProcessingResult
 	if len(prs) == 0 {
 		return ""
 	}
 	allFinal := true
+	pending := ""
 	for _, p := range prs {
 		switch p.InvoiceStatus {
 		case "ABORTED":
 			return "ABORTED"
 		case "FINISHED", "DONE":
-			// ok
+			// final
 		default:
 			allFinal = false
+			if pending == "" {
+				pending = p.InvoiceStatus
+			}
 		}
 	}
 	if allFinal {
 		return "FINISHED"
 	}
-	return prs[0].InvoiceStatus
+	// pending may be "" when NAV returned an empty status — the caller's
+	// default branch polls again either way.
+	return pending
 }
 
+// markFailure records a failed SUBMIT attempt. Retriable failures
+// requeue to pending with backoff (nothing reached NAV, so the next
+// attempt re-submits); non-retriable ones reject terminally.
 func (w *Worker) markFailure(ctx context.Context, sub Submission, cause error, retriable bool) {
-	_ = w.store.UpdateStatus(ctx, sub.EventID, func(s *Submission) error {
+	w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
 		s.Attempts++
 		s.LastError = cause.Error()
 		if !retriable {
@@ -588,6 +620,25 @@ func (w *Worker) markFailure(ctx context.Context, sub Submission, cause error, r
 		}
 		s.NextAttemptAt = w.clock().Add(w.backoffFor(s.Attempts))
 		return s.Transition(StatusPending)
+	})
+}
+
+// markPollFailure records a failed STATUS POLL. The row already carries
+// a NAV transactionId, so a retriable failure must NOT requeue to
+// pending — that would re-submit the invoice and create a duplicate on
+// NAV's side. Instead the row stays submitted/processing and only its
+// NextAttemptAt moves out, so a later claim resumes polling the same
+// transaction.
+func (w *Worker) markPollFailure(ctx context.Context, sub Submission, cause error, retriable bool) {
+	w.updateStatus(ctx, sub.EventID, func(s *Submission) error {
+		s.Attempts++
+		s.LastError = cause.Error()
+		if !retriable {
+			w.metrics.RecordSubmissionResult(string(StatusRejected))
+			return s.Transition(StatusRejected)
+		}
+		s.NextAttemptAt = w.clock().Add(w.backoffFor(s.Attempts))
+		return nil
 	})
 }
 

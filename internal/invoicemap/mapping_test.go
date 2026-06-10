@@ -681,3 +681,106 @@ func TestMapInvoice_MarshalsToXML(t *testing.T) {
 		}
 	}
 }
+
+// TestMapInvoice_RejectsTruncatedLines pins the has_more guard: Stripe
+// webhook payloads embed only the first page of line items, and mapping
+// a truncated list would silently under-report the invoice to NAV.
+func TestMapInvoice_RejectsTruncatedLines(t *testing.T) {
+	inv := makeInvoice("2026/00009", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+	inv.Lines.HasMore = true
+	_, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	var me *MappingError
+	if !errors.As(err, &me) || me.Code != CodeInvoiceLinesTruncated {
+		t.Fatalf("want %s, got %v", CodeInvoiceLinesTruncated, err)
+	}
+}
+
+// TestMapInvoice_SupplierAddressRequired pins that an incomplete
+// supplier address (no street detail) fails mapping instead of emitting
+// a simpleAddress NAV's schema rejects.
+func TestMapInvoice_SupplierAddressRequired(t *testing.T) {
+	inv := makeInvoice("2026/00010", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+	sup := defaultSupplier()
+	sup.Address.AdditionalDetail = "  "
+	_, err := MapInvoice(inv, MapOptions{Supplier: sup})
+	var me *MappingError
+	if !errors.As(err, &me) || me.Code != CodeSupplierAddressRequired {
+		t.Fatalf("want %s, got %v", CodeSupplierAddressRequired, err)
+	}
+}
+
+// TestMapInvoice_PrivatePersonOmitsNameAndAddress pins NAV's
+// data-minimisation rule: a PRIVATE_PERSON customer block carries only
+// the status — no name, no address, no vat data.
+func TestMapInvoice_PrivatePersonOmitsNameAndAddress(t *testing.T) {
+	inv := makeInvoice("2026/00011", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+	inv.CustomerName = "Tóth Mária"
+	inv.CustomerAddress = &stripe.Address{Country: "HU", PostalCode: "1011", City: "Budapest", Line1: "Fő utca 2."}
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	c := got.InvoiceMain.Invoice.InvoiceHead.CustomerInfo
+	if c.CustomerVatStatus != CustomerPrivatePerson {
+		t.Fatalf("status = %s, want PRIVATE_PERSON", c.CustomerVatStatus)
+	}
+	if c.CustomerName != "" || c.CustomerAddress != nil || c.CustomerVatData != nil {
+		t.Errorf("PRIVATE_PERSON must omit name/address/vatData, got %+v", c)
+	}
+}
+
+// TestMapInvoice_CustomerAddressOmittedWithoutStreetDetail pins that a
+// business customer whose Stripe address has no line1/line2 gets no
+// customerAddress element at all (simpleAddress requires a non-blank
+// additionalAddressDetail).
+func TestMapInvoice_CustomerAddressOmittedWithoutStreetDetail(t *testing.T) {
+	inv := makeInvoice("2026/00012", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Service", 1_000_000, 270_000),
+	})
+	inv.CustomerName = "ACME Kft."
+	inv.CustomerAddress = &stripe.Address{Country: "HU", PostalCode: "1011", City: "Budapest"}
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	c := got.InvoiceMain.Invoice.InvoiceHead.CustomerInfo
+	if c.CustomerVatStatus == CustomerPrivatePerson {
+		t.Fatalf("fixture should classify as business, got PRIVATE_PERSON")
+	}
+	if c.CustomerAddress != nil {
+		t.Errorf("customerAddress should be omitted without street detail, got %+v", c.CustomerAddress)
+	}
+	if c.CustomerName != "ACME Kft." {
+		t.Errorf("business customer keeps its name, got %q", c.CustomerName)
+	}
+}
+
+// TestMapInvoice_SameRateRoundingMergesBuckets pins the 2-decimal
+// bucket key: two 27% lines whose per-line vat/net ratio differs only
+// past the 2nd decimal must land in ONE summaryByVatRate row — NAV
+// rejects duplicate vatPercentage rows.
+func TestMapInvoice_SameRateRoundingMergesBuckets(t *testing.T) {
+	inv := makeInvoice("2026/00013", "huf", 1_700_000_000, []*stripe.InvoiceLineItem{
+		huLine("Exact 27%", 1_000_000, 270_000),
+		// 270000 / 1000100 = 0.269973… — same legal rate, drifted by
+		// minor-unit rounding.
+		huLine("Drifted 27%", 1_000_100, 270_000),
+	})
+	got, err := MapInvoice(inv, MapOptions{Supplier: defaultSupplier()})
+	if err != nil {
+		t.Fatalf("MapInvoice: %v", err)
+	}
+	rows := got.InvoiceMain.Invoice.InvoiceSummary.SummaryNormal.SummaryByVatRate
+	if len(rows) != 1 {
+		t.Fatalf("summaryByVatRate rows = %d, want 1 (same rendered rate must merge)", len(rows))
+	}
+	if rows[0].VatRate.VatPercentage != "0.27" {
+		t.Errorf("vatPercentage = %q, want 0.27", rows[0].VatRate.VatPercentage)
+	}
+}

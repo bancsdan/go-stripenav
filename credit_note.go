@@ -32,9 +32,14 @@ func invoiceAsStorno(inv *stripe.Invoice, now time.Time) *stripe.Invoice {
 				if t == nil {
 					continue
 				}
+				// TaxBehavior must survive the flip: it tells the mapper
+				// whether the (negated) line amount is gross or net. An
+				// inclusive-tax storno without it would compute net from
+				// gross and misstate the reversal by the VAT amount.
 				taxes = append(taxes, &stripe.InvoiceLineItemTax{
 					Amount:        -t.Amount,
 					TaxableAmount: -t.TaxableAmount,
+					TaxBehavior:   t.TaxBehavior,
 				})
 			}
 			out = append(out, &stripe.InvoiceLineItem{

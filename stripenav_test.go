@@ -14,10 +14,10 @@ import (
 	"time"
 
 	stripenav "github.com/bancsdan/go-stripenav"
+	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
 	"github.com/bancsdan/go-stripenav/nav/schemas"
-	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 	"github.com/stripe/stripe-go/v82/webhook"
 )
 
@@ -130,7 +130,7 @@ func handlerWithFake(t *testing.T, fake stripenav.NAVClient) (*stripenav.BridgeH
 		Supplier: mapping.Supplier{
 			TaxNumber: "12345678-9-01",
 			Name:      "Test Merchant Kft.",
-			Address:   mapping.Address{CountryCode: "HU", PostalCode: "1011", City: "Budapest"},
+			Address:   mapping.Address{CountryCode: "HU", PostalCode: "1011", City: "Budapest", AdditionalDetail: "Fő utca 1."},
 		},
 		Store:         storeinmem.New(),
 		DisableWorker: true,
@@ -294,34 +294,34 @@ func TestHandler_FatPayloadDecodesAndMaps(t *testing.T) {
 
 	inv := map[string]any{
 		// Top-level invoice fields a real Stripe Tax invoice carries.
-		"id":                    "in_FAT01",
-		"object":                "invoice",
-		"number":                "2026-FAT",
-		"currency":              "huf",
-		"status":                "open",
-		"livemode":              false,
-		"account_country":       "HU",
-		"account_name":          "Bancsi Daniel E.V.",
-		"account_tax_ids":       []string{"txi_FAKE"},
-		"amount_due":            1_270_000,
-		"amount_paid":           0,
-		"amount_remaining":      1_270_000,
-		"amount_shipping":       0,
-		"application":           nil,
-		"attempt_count":         0,
-		"attempted":             false,
-		"auto_advance":          false,
-		"automatic_tax":         map[string]any{"enabled": true, "status": "complete", "provider": "stripe", "liability": map[string]any{"type": "self"}},
-		"billing_reason":        "subscription_cycle",
-		"collection_method":     "charge_automatically",
-		"created":               finalized - 60,
-		"custom_fields":         nil,
-		"customer":              "cus_FAT01",
-		"customer_email":        "fat@example.hu",
-		"customer_name":         "Fat Payload Kft.",
-		"customer_phone":        nil,
-		"customer_shipping":     nil,
-		"customer_tax_exempt":   "none",
+		"id":                  "in_FAT01",
+		"object":              "invoice",
+		"number":              "2026-FAT",
+		"currency":            "huf",
+		"status":              "open",
+		"livemode":            false,
+		"account_country":     "HU",
+		"account_name":        "Bancsi Daniel E.V.",
+		"account_tax_ids":     []string{"txi_FAKE"},
+		"amount_due":          1_270_000,
+		"amount_paid":         0,
+		"amount_remaining":    1_270_000,
+		"amount_shipping":     0,
+		"application":         nil,
+		"attempt_count":       0,
+		"attempted":           false,
+		"auto_advance":        false,
+		"automatic_tax":       map[string]any{"enabled": true, "status": "complete", "provider": "stripe", "liability": map[string]any{"type": "self"}},
+		"billing_reason":      "subscription_cycle",
+		"collection_method":   "charge_automatically",
+		"created":             finalized - 60,
+		"custom_fields":       nil,
+		"customer":            "cus_FAT01",
+		"customer_email":      "fat@example.hu",
+		"customer_name":       "Fat Payload Kft.",
+		"customer_phone":      nil,
+		"customer_shipping":   nil,
+		"customer_tax_exempt": "none",
 		"customer_address": map[string]any{
 			"city":        "Budapest",
 			"country":     "HU",
@@ -506,7 +506,7 @@ func TestHandler_Shutdown(t *testing.T) {
 			SignKey: "k", ExchangeKey: "0123456789ABCDEF",
 			Software: nav.Software{ID: "SW", Name: "n", Operation: "LOCAL_SOFTWARE"},
 		},
-		Supplier: mapping.Supplier{TaxNumber: "12345678-9-01", Name: "T", Address: mapping.Address{CountryCode: "HU"}},
+		Supplier: mapping.Supplier{TaxNumber: "12345678-9-01", Name: "T", Address: mapping.Address{CountryCode: "HU", PostalCode: "1011", City: "Budapest", AdditionalDetail: "Fő utca 1."}},
 		Store:    storeinmem.New(),
 	}
 	fake := &fakeNAVClient{
@@ -525,5 +525,103 @@ func TestHandler_Shutdown(t *testing.T) {
 	defer cancel()
 	if err := h.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// failingPutStore wraps the in-memory store and fails Put with a
+// transient I/O-style error, simulating a database outage at persist
+// time.
+type failingPutStore struct {
+	*storeinmem.Store
+	putErr error
+}
+
+func (s *failingPutStore) Put(ctx context.Context, sub stripenav.Submission) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
+	return s.Store.Put(ctx, sub)
+}
+
+// TestHandler_TransientStoreFailureReturns503 pins the ACK semantics:
+// when nothing could be persisted, the handler must NOT return 200 —
+// a 200 tells Stripe the event is handled and the event would be lost
+// forever. 503 keeps it in Stripe's retry queue.
+func TestHandler_TransientStoreFailureReturns503(t *testing.T) {
+	store := &failingPutStore{Store: storeinmem.New(), putErr: errors.New("db connection refused")}
+	cfg := stripenav.Config{
+		StripeWebhookSecret: "whsec_test",
+		NAV: nav.Config{
+			BaseURL: "https://example/v3", Login: "u", Password: "p", TaxNumber: "11111111",
+			SignKey: "k", ExchangeKey: "0123456789ABCDEF",
+			Software: nav.Software{ID: "SW", Name: "n", Operation: "LOCAL_SOFTWARE"},
+		},
+		Supplier: mapping.Supplier{
+			TaxNumber: "12345678-9-01",
+			Name:      "Test Merchant Kft.",
+			Address:   mapping.Address{CountryCode: "HU", PostalCode: "1011", City: "Budapest", AdditionalDetail: "Fő utca 1."},
+		},
+		Store:         store,
+		DisableWorker: true,
+	}
+	h, err := stripenav.Handler(cfg, stripenav.WithNAVClient(&fakeNAVClient{}))
+	if err != nil {
+		t.Fatalf("Handler: %v", err)
+	}
+
+	payload := newFinalizedInvoiceEvent(t, "2026-503")
+	sig := signStripeWebhook(payload, cfg.StripeWebhookSecret, time.Now())
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	req.Header.Set("Stripe-Signature", sig)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (store failure must not ACK the event)", w.Code)
+	}
+
+	// Store recovers; Stripe redelivers the same payload; now it lands.
+	store.putErr = nil
+	req = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	req.Header.Set("Stripe-Signature", sig)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("redelivery status = %d, want 200", w.Code)
+	}
+	if _, err := store.Get(context.Background(), "evt_2026-503"); err != nil {
+		t.Fatalf("event not persisted after redelivery: %v", err)
+	}
+}
+
+// TestHandler_PermanentMappingFailureReturns200 pins the other side:
+// an unmappable event (here: no invoice number) fails identically on
+// every redelivery, so the handler ACKs with 200 to stop Stripe's
+// retry loop.
+func TestHandler_PermanentMappingFailureReturns200(t *testing.T) {
+	h, cfg := handlerWithFake(t, &fakeNAVClient{})
+	inv := map[string]any{
+		"id":       "in_nonum",
+		"object":   "invoice",
+		"currency": "huf", // no "number" field → CodeInvoiceNumberMissing
+		"status_transitions": map[string]any{
+			"finalized_at": time.Now().Add(-time.Minute).Unix(),
+		},
+		"lines": map[string]any{
+			"data": []map[string]any{
+				{"description": "x", "amount": 1000, "quantity": 1, "taxes": []map[string]any{{"amount": 270}}},
+			},
+		},
+	}
+	payload := marshalEvent(t, "evt_nonum", "invoice.finalized", inv)
+	sig := signStripeWebhook(payload, cfg.StripeWebhookSecret, time.Now())
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+	req.Header.Set("Stripe-Signature", sig)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (permanent failures must not retry-loop)", w.Code)
+	}
+	if _, err := cfg.Store.Get(context.Background(), "evt_nonum"); !errors.Is(err, stripenav.ErrNotFound) {
+		t.Fatalf("unmappable event must not be persisted, Get err = %v", err)
 	}
 }

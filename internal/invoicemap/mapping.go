@@ -34,6 +34,7 @@ func localDate(t time.Time) string {
 // Operation is the NAV invoice operation produced by the mapper.
 type Operation string
 
+// The NAV manageInvoice operation literals.
 const (
 	OpCreate Operation = "CREATE"
 	OpModify Operation = "MODIFY"
@@ -82,6 +83,15 @@ type MapOptions struct {
 	// PaymentMethod is one of TRANSFER, CARD, CASH, OTHER. Defaults to
 	// CARD (Stripe's most common collection method).
 	PaymentMethod string
+
+	// OriginalLineCount is the number of lines on the original invoice
+	// this MODIFY/STORNO references. NAV's line chain appends each
+	// modification document's lines after the original's, so
+	// lineNumberReference for this document's line idx (0-based) is
+	// OriginalLineCount + idx + 1. When zero, the mapper falls back to
+	// this document's own line count — correct only for a 1:1 storno
+	// that mirrors the original.
+	OriginalLineCount int
 }
 
 // MapInvoice converts a Stripe invoice into a NAV InvoiceData document.
@@ -103,6 +113,14 @@ func MapInvoice(inv *stripe.Invoice, opts MapOptions) (schemas.InvoiceData, erro
 	}
 	if inv.Lines == nil || len(inv.Lines.Data) == 0 {
 		return schemas.InvoiceData{}, newMappingError(CodeInvoiceLinesEmpty, "invoice.lines")
+	}
+	// Stripe webhook payloads embed only the first page of line items
+	// (has_more=true marks truncation). Mapping a truncated list would
+	// produce an internally-consistent but incomplete NAV report —
+	// silent under-reporting NAV cannot detect. Refuse instead; callers
+	// must fetch the full line list from the Stripe API first.
+	if inv.Lines.HasMore {
+		return schemas.InvoiceData{}, newMappingError(CodeInvoiceLinesTruncated, "invoice.lines.has_more")
 	}
 
 	currency := strings.ToUpper(string(inv.Currency))
@@ -127,7 +145,11 @@ func MapInvoice(inv *stripe.Invoice, opts MapOptions) (schemas.InvoiceData, erro
 	}
 	customerInfo := buildCustomer(inv)
 
-	lines, byRate, totals, err := buildLines(inv, currency, rate, opts.Operation)
+	originalLineCount := opts.OriginalLineCount
+	if originalLineCount <= 0 {
+		originalLineCount = len(inv.Lines.Data)
+	}
+	lines, byRate, totals, err := buildLines(inv, currency, rate, opts.Operation, originalLineCount)
 	if err != nil {
 		return schemas.InvoiceData{}, err
 	}
@@ -248,6 +270,14 @@ func buildSupplier(s mapping.Supplier) (schemas.SupplierInfo, error) {
 	if !ok {
 		return schemas.SupplierInfo{}, newMappingError(CodeSupplierTaxNumberRequired, "Supplier.TaxNumber")
 	}
+	// NAV's simpleAddress requires a non-blank additionalAddressDetail
+	// (the street/number part). The supplier address is mandatory on
+	// every invoice, so an incomplete one would fail NAV schema
+	// validation on every submission — surface it as a mapping error
+	// instead.
+	if strings.TrimSpace(s.Address.AdditionalDetail) == "" {
+		return schemas.SupplierInfo{}, newMappingError(CodeSupplierAddressRequired, "Supplier.Address.AdditionalDetail")
+	}
 	return schemas.SupplierInfo{
 		SupplierTaxNumber: tn,
 		SupplierName:      s.Name,
@@ -270,18 +300,30 @@ func buildCustomer(inv *stripe.Invoice) *schemas.CustomerInfo {
 	info := &schemas.CustomerInfo{
 		CustomerVatStatus: status,
 		CustomerVatData:   vatData,
-		CustomerName:      inv.CustomerName,
 	}
+	// NAV's data-minimisation rule: for PRIVATE_PERSON the report must
+	// not carry name or address (the customer block is just the status).
+	if status == CustomerPrivatePerson {
+		return info
+	}
+	info.CustomerName = inv.CustomerName
 	if inv.CustomerAddress != nil {
-		info.CustomerAddress = &schemas.Address{
-			Simple: &schemas.SimpleAddress{
-				CountryCode: inv.CustomerAddress.Country,
-				PostalCode:  inv.CustomerAddress.PostalCode,
-				City:        inv.CustomerAddress.City,
-				AdditionalAddress: strings.TrimSpace(
-					strings.Join([]string{inv.CustomerAddress.Line1, inv.CustomerAddress.Line2}, " "),
-				),
-			},
+		detail := strings.TrimSpace(
+			strings.Join([]string{inv.CustomerAddress.Line1, inv.CustomerAddress.Line2}, " "),
+		)
+		// simpleAddress requires a non-blank additionalAddressDetail;
+		// customerAddress itself is optional, so when Stripe has no
+		// street data we omit the whole address rather than emit an
+		// element NAV's schema rejects.
+		if detail != "" {
+			info.CustomerAddress = &schemas.Address{
+				Simple: &schemas.SimpleAddress{
+					CountryCode:       inv.CustomerAddress.Country,
+					PostalCode:        inv.CustomerAddress.PostalCode,
+					City:              inv.CustomerAddress.City,
+					AdditionalAddress: detail,
+				},
+			}
 		}
 	}
 	return info
@@ -329,7 +371,7 @@ func newInvoiceTotals() invoiceTotals {
 	return invoiceTotals{netFC: new(big.Rat), vatFC: new(big.Rat), netHUF: new(big.Rat), vatHUF: new(big.Rat)}
 }
 
-func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operation) ([]schemas.Line, map[string]*rateTotals, invoiceTotals, error) {
+func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operation, originalLineCount int) ([]schemas.Line, map[string]*rateTotals, invoiceTotals, error) {
 	lines := make([]schemas.Line, 0, len(inv.Lines.Data))
 	byRate := map[string]*rateTotals{}
 	totals := newInvoiceTotals()
@@ -371,7 +413,12 @@ func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operatio
 		netHUF := toHUF(net, rate)
 		vatHUF := toHUF(vat, rate)
 
-		key := ratePct.FloatString(6)
+		// Bucket on the 2-decimal rendering — the same precision NAV
+		// sees in vatPercentage. Keying on more decimals would let two
+		// lines at the same legal rate (27%) land in separate buckets
+		// when minor-unit rounding skews vat/net by a millionth, and
+		// NAV rejects duplicate vatPercentage summary rows.
+		key := ratePct.FloatString(2)
 		bucket, ok := byRate[key]
 		if !ok {
 			bucket = newRateTotals(key)
@@ -428,14 +475,14 @@ func buildLines(inv *stripe.Invoice, currency string, rate *big.Rat, op Operatio
 		// submission appends lines to the chain at the next free
 		// positions. lineNumberReference is the line's position in
 		// that cumulative chain, NOT a back-reference to the original
-		// line being reversed. The original already occupies chain
-		// positions 1..N, so a full storno that mirrors the original
-		// 1:1 claims positions N+1..2N. lineOperation must always be
-		// CREATE — every line on a modification document is a new
-		// entry in the chain.
+		// line being reversed. The original occupies chain positions
+		// 1..originalLineCount, so this document's lines claim the
+		// positions after it. lineOperation must always be CREATE —
+		// every line on a modification document is a new entry in the
+		// chain.
 		if op == OpModify || op == OpStorno {
 			line.LineModificationReference = &schemas.LineModificationReference{
-				LineNumberReference: len(inv.Lines.Data) + idx + 1,
+				LineNumberReference: originalLineCount + idx + 1,
 				LineOperation:       "CREATE",
 			}
 		}
@@ -495,38 +542,34 @@ func buildSummary(byRate map[string]*rateTotals, totals invoiceTotals, currency 
 	}
 }
 
-// reconciledNetVatGross renders net/vat/gross such that the rendered
-// strings satisfy net + vat = gross exactly, even when independent
-// rounding of net, vat, and gross from a big.Rat would otherwise drift
-// by a fractional unit (NAV rejects invoiceNet+invoiceVat ≠ invoiceGross).
-// We render net and vat first, then reconstruct gross from the rounded
-// values so it always reconciles.
-func reconciledNetVatGross(net, vat *big.Rat, currency string) (netStr, vatStr, grossStr string) {
-	netStr = formatAmount(net, currency)
-	vatStr = formatAmount(vat, currency)
+// reconciled renders net/vat/gross with the given formatter such that
+// the rendered strings satisfy net + vat = gross exactly, even when
+// independent rounding of net, vat, and gross from a big.Rat would
+// otherwise drift by a fractional unit (NAV rejects
+// invoiceNet+invoiceVat ≠ invoiceGross). Net and vat render first, then
+// gross is reconstructed from the rounded values so it always
+// reconciles.
+func reconciled(net, vat *big.Rat, format func(*big.Rat) string) (netStr, vatStr, grossStr string) {
+	netStr = format(net)
+	vatStr = format(vat)
 	netR, _ := new(big.Rat).SetString(netStr)
 	vatR, _ := new(big.Rat).SetString(vatStr)
-	grossStr = formatAmount(new(big.Rat).Add(netR, vatR), currency)
+	grossStr = format(new(big.Rat).Add(netR, vatR))
 	return
+}
+
+func reconciledNetVatGross(net, vat *big.Rat, currency string) (netStr, vatStr, grossStr string) {
+	return reconciled(net, vat, func(r *big.Rat) string { return formatAmount(r, currency) })
 }
 
 func reconciledNetVatGrossHUF(net, vat *big.Rat) (netStr, vatStr, grossStr string) {
-	netStr = formatHUF(net)
-	vatStr = formatHUF(vat)
-	netR, _ := new(big.Rat).SetString(netStr)
-	vatR, _ := new(big.Rat).SetString(vatStr)
-	grossStr = formatHUF(new(big.Rat).Add(netR, vatR))
-	return
+	return reconciled(net, vat, formatHUF)
 }
 
 func ratePctFromKey(k string) string {
-	// keys are produced via FloatString(6); render at 2 decimals for the
-	// summary to match the line.vatPercentage rendering.
-	r := new(big.Rat)
-	if _, ok := r.SetString(k); !ok {
-		return k
-	}
-	return r.FloatString(2)
+	// Keys are already the 2-decimal vatPercentage rendering; the
+	// summary row reuses them verbatim so line and summary always agree.
+	return k
 }
 
 func maxInt64(a, b int64) int64 {

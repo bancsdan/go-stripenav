@@ -14,7 +14,7 @@ var ErrBatchTooLarge = errors.New("nav: per-batch operation limit (100) exceeded
 // message, and a Retriable bool derived from the documented error list.
 // Consumers can errors.As() into this to inspect retriability or surface
 // NAV-specific codes.
-type NAVError struct {
+type NAVError struct { //nolint:revive // established API; nav.Error would read as the error interface, not clearer
 	HTTPStatus int
 	FuncCode   string
 	Code       string

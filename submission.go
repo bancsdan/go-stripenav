@@ -8,6 +8,7 @@ import (
 // internal state machine.
 type SubmissionStatus = submission.Status
 
+// The submission state machine's states, re-exported for consumers.
 const (
 	StatusPending    = submission.StatusPending
 	StatusSubmitted  = submission.StatusSubmitted
@@ -20,6 +21,7 @@ const (
 // EventKind tags what kind of work the submission represents.
 type EventKind = submission.Kind
 
+// The submission kinds the bridge produces, re-exported for consumers.
 const (
 	KindInvoice    = submission.KindInvoice
 	KindAnnulment  = submission.KindAnnulment
@@ -37,6 +39,11 @@ type SubmissionStore = submission.Store
 // ErrNotFound is returned by SubmissionStore implementations when the
 // requested event id is unknown.
 var ErrNotFound = submission.ErrNotFound
+
+// ErrAlreadyExists is wrapped by SubmissionStore.Put when a submission
+// with the same EventID is already present. The handler treats it as a
+// benign duplicate delivery rather than a store failure.
+var ErrAlreadyExists = submission.ErrAlreadyExists
 
 // ErrClaimLost is returned by RenewClaim and ReleaseClaim when the
 // caller's claim is no longer valid (lease expired, taken by another

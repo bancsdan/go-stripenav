@@ -20,7 +20,7 @@ func TestPasswordHash(t *testing.T) {
 		t.Fatalf("PasswordHash length = %d, want 128", len(got))
 	}
 	for _, r := range got {
-		if !((r >= '0' && r <= '9') || (r >= 'A' && r <= 'F')) {
+		if (r < '0' || r > '9') && (r < 'A' || r > 'F') {
 			t.Fatalf("PasswordHash contains non-uppercase-hex rune %q", r)
 		}
 	}

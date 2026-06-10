@@ -18,6 +18,7 @@ import (
 	"github.com/bancsdan/go-stripenav/internal/storeinmem"
 	"github.com/bancsdan/go-stripenav/mapping"
 	"github.com/bancsdan/go-stripenav/nav"
+	"github.com/bancsdan/go-stripenav/nav/schemas"
 	stripe "github.com/stripe/stripe-go/v82"
 	"github.com/stripe/stripe-go/v82/webhook"
 )
@@ -44,9 +45,11 @@ type Config struct {
 	Store SubmissionStore
 
 	// ExchangeRateProvider returns the foreign→HUF exchange rate for
-	// the given currency code at the given time. Required when invoices
-	// in non-HUF currencies are expected; if nil, non-HUF invoices will
-	// fail mapping.
+	// the given currency code. The `at` argument is the invoice's issue
+	// time (the document's tax point), not the processing time — so a
+	// redelivered or delayed webhook resolves the same rate as a prompt
+	// one. Required when invoices in non-HUF currencies are expected;
+	// if nil, non-HUF invoices will fail mapping.
 	ExchangeRateProvider func(ctx context.Context, currency string, at time.Time) (string, error)
 
 	// Logger is optional; defaults to slog.Default().
@@ -144,7 +147,6 @@ func Handler(cfg Config, opts ...Option) (*BridgeHandler, error) {
 		worker, err := NewWorker(WorkerConfig{
 			Store:         cfg.Store,
 			Client:        cfg.navClient,
-			Supplier:      cfg.Supplier,
 			Logger:        cfg.Logger,
 			Metrics:       cfg.Metrics,
 			Clock:         cfg.Clock,
@@ -157,7 +159,7 @@ func Handler(cfg Config, opts ...Option) (*BridgeHandler, error) {
 			return nil, err
 		}
 		h.worker = worker
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is retained on the handler and invoked by Shutdown
 		h.cancel = cancel
 		h.wg.Add(1)
 		go func() {
@@ -223,6 +225,28 @@ func (h *BridgeHandler) Shutdown(ctx context.Context) error {
 	}
 }
 
+// permanentError marks a processing failure that a Stripe redelivery
+// cannot fix: undecodable payloads, unmappable invoices, configuration
+// gaps. The handler ACKs these with 200 (retrying would loop forever);
+// everything else — store I/O, exchange-rate lookups — is transient and
+// answered with 503 so Stripe's retry schedule redelivers the event.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+func permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentError{err: err}
+}
+
+func isPermanent(err error) bool {
+	var p *permanentError
+	return errors.As(err, &p)
+}
+
 // ServeHTTP handles a Stripe webhook delivery.
 func (h *BridgeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -253,9 +277,17 @@ func (h *BridgeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := h.processEvent(ctx, &event, body); err != nil {
-		// We never fail-close to Stripe: log + 200 so the worker can
-		// retry. The error is recorded on the submission record.
 		h.cfg.Logger.Error("stripenav: process event", "event_id", event.ID, "type", event.Type, "err", err)
+		// Permanent failures (undecodable / unmappable event) get a 200:
+		// Stripe redelivering the same payload would fail identically,
+		// and a non-2xx would keep the delivery in Stripe's retry queue
+		// for days. Transient failures (store down, rate lookup failed)
+		// get a 503 — nothing was persisted, so Stripe's redelivery is
+		// the only retry path for this event.
+		if !isPermanent(err) {
+			http.Error(w, "temporarily unable to accept event", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -299,11 +331,7 @@ func (h *BridgeHandler) processEvent(ctx context.Context, event *stripe.Event, r
 func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event, sub *Submission) error {
 	inv, err := decodeInvoice(event)
 	if err != nil {
-		return err
-	}
-	rate, err := h.rateFor(ctx, string(inv.Currency))
-	if err != nil {
-		return err
+		return permanent(err)
 	}
 
 	var (
@@ -316,9 +344,8 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 		invForMap = inv
 		op = "CREATE"
 		opts = invoicemap.MapOptions{
-			Supplier:          h.cfg.Supplier,
-			Operation:         invoicemap.OpCreate,
-			ExchangeRateToHUF: rate,
+			Supplier:  h.cfg.Supplier,
+			Operation: invoicemap.OpCreate,
 		}
 	case "invoice.voided", "invoice.marked_uncollectible":
 		invForMap = invoiceAsStorno(inv, h.cfg.Clock())
@@ -327,7 +354,11 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 			Supplier:              h.cfg.Supplier,
 			Operation:             invoicemap.OpStorno,
 			OriginalInvoiceNumber: inv.Number,
-			ExchangeRateToHUF:     rate,
+		}
+		// The storno's lines extend the original's chain positions; the
+		// original is `inv` itself, pre-clone.
+		if inv.Lines != nil {
+			opts.OriginalLineCount = len(inv.Lines.Data)
 		}
 		// Record the dependency on the prior CREATE so the worker can
 		// wait for NAV to finish processing it before submitting this
@@ -337,30 +368,65 @@ func (h *BridgeHandler) processInvoice(ctx context.Context, event *stripe.Event,
 			sub.ParentEventID = parent
 		}
 	default:
-		return fmt.Errorf("stripenav: unexpected invoice event %q", event.Type)
+		return permanent(fmt.Errorf("stripenav: unexpected invoice event %q", event.Type))
 	}
 
+	// The rate is anchored to the document's issue time: the original's
+	// finalization for a CREATE, "now" for a storno (its own issuance
+	// moment).
+	rate, err := h.rateFor(ctx, string(inv.Currency), stripeInvoiceIssueTime(invForMap, h.cfg.Clock()))
+	if err != nil {
+		return err
+	}
+	opts.ExchangeRateToHUF = rate
+
 	sub.InvoiceNumber = invForMap.Number
-	sub.Operation = op
 
 	mapped, err := invoicemap.MapInvoice(invForMap, opts)
 	if err != nil {
-		return err
+		return permanent(err)
 	}
+	return h.persistMapped(ctx, sub, mapped, op)
+}
+
+// persistMapped marshals the mapped InvoiceData into the submission's
+// RawEvent (so the worker can retry without re-mapping), persists it,
+// and wakes the worker. A Put that reports ErrAlreadyExists is the
+// benign side of the Get-then-Put dedup race — a concurrent delivery of
+// the same event won — and is treated as success.
+func (h *BridgeHandler) persistMapped(ctx context.Context, sub *Submission, mapped schemas.InvoiceData, op string) error {
 	payload, err := xml.Marshal(mapped)
 	if err != nil {
-		return err
+		return permanent(err)
 	}
-	payload = append([]byte(xml.Header), payload...)
-	sub.RawEvent = payload // store the mapped XML so the worker can retry without re-mapping.
+	sub.RawEvent = append([]byte(xml.Header), payload...)
+	sub.Operation = op
 
 	if err := h.cfg.Store.Put(ctx, *sub); err != nil {
+		if errors.Is(err, ErrAlreadyExists) {
+			return nil
+		}
 		return err
 	}
 	if h.worker != nil {
 		h.worker.Wakeup()
 	}
 	return nil
+}
+
+// stripeInvoiceIssueTime mirrors the mapper's issue-date derivation:
+// finalization time, then effective_at, then created, then fallback.
+func stripeInvoiceIssueTime(inv *stripe.Invoice, fallback time.Time) time.Time {
+	if inv.StatusTransitions != nil && inv.StatusTransitions.FinalizedAt > 0 {
+		return time.Unix(inv.StatusTransitions.FinalizedAt, 0).UTC()
+	}
+	if inv.EffectiveAt > 0 {
+		return time.Unix(inv.EffectiveAt, 0).UTC()
+	}
+	if inv.Created > 0 {
+		return time.Unix(inv.Created, 0).UTC()
+	}
+	return fallback
 }
 
 // findParentSubmission looks up a previously-recorded submission whose
@@ -413,19 +479,29 @@ func (h *BridgeHandler) AnnulInvoice(ctx context.Context, invoiceNumber, reason 
 func (h *BridgeHandler) processCreditNote(ctx context.Context, event *stripe.Event, sub *Submission) error {
 	cn, err := decodeCreditNote(event)
 	if err != nil {
-		return err
+		return permanent(err)
 	}
 	if cn.Invoice == nil {
-		return errors.New("stripenav: credit note has no invoice reference")
+		return permanent(errors.New("stripenav: credit note has no invoice reference"))
 	}
 	sub.InvoiceNumber = cn.Number
-	rate, err := h.rateFor(ctx, string(cn.Currency))
+	issuedAt := h.cfg.Clock()
+	if cn.EffectiveAt > 0 {
+		issuedAt = time.Unix(cn.EffectiveAt, 0).UTC()
+	} else if cn.Created > 0 {
+		issuedAt = time.Unix(cn.Created, 0).UTC()
+	}
+	rate, err := h.rateFor(ctx, string(cn.Currency), issuedAt)
 	if err != nil {
 		return err
 	}
 	// The credit note maps to a MODIFY against the original invoice.
 	// We synthesise a minimal Stripe-Invoice-shaped object for the
 	// mapper: the credit note's lines become the modification lines.
+	// Note: the original invoice's line count is unknown here (the
+	// event carries only the credit note), so the mapper's
+	// OriginalLineCount fallback applies — wrong for originals whose
+	// line count differs. Tracked in the credit-note roadmap item.
 	invForMap := creditNoteAsInvoice(cn)
 	mapped, err := invoicemap.MapInvoice(invForMap, invoicemap.MapOptions{
 		Supplier:              h.cfg.Supplier,
@@ -435,32 +511,22 @@ func (h *BridgeHandler) processCreditNote(ctx context.Context, event *stripe.Eve
 		ExchangeRateToHUF:     rate,
 	})
 	if err != nil {
-		return err
+		return permanent(err)
 	}
-	payload, err := xml.Marshal(mapped)
-	if err != nil {
-		return err
-	}
-	payload = append([]byte(xml.Header), payload...)
-	sub.RawEvent = payload
-	sub.Operation = "MODIFY"
-	if err := h.cfg.Store.Put(ctx, *sub); err != nil {
-		return err
-	}
-	if h.worker != nil {
-		h.worker.Wakeup()
-	}
-	return nil
+	return h.persistMapped(ctx, sub, mapped, "MODIFY")
 }
 
-func (h *BridgeHandler) rateFor(ctx context.Context, currency string) (string, error) {
+// rateFor resolves the foreign→HUF rate for the document issued at the
+// given time. A missing provider is a configuration gap (permanent); a
+// provider call failure is transient and worth a Stripe redelivery.
+func (h *BridgeHandler) rateFor(ctx context.Context, currency string, at time.Time) (string, error) {
 	if strings.EqualFold(currency, "HUF") {
 		return "", nil
 	}
 	if h.cfg.ExchangeRateProvider == nil {
-		return "", fmt.Errorf("stripenav: invoice currency %s requires ExchangeRateProvider", currency)
+		return "", permanent(fmt.Errorf("stripenav: invoice currency %s requires ExchangeRateProvider", currency))
 	}
-	return h.cfg.ExchangeRateProvider(ctx, currency, h.cfg.Clock())
+	return h.cfg.ExchangeRateProvider(ctx, currency, at)
 }
 
 // decodeInvoice extracts a *stripe.Invoice from the event's Data.Raw blob.

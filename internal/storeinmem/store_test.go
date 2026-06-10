@@ -3,7 +3,6 @@ package storeinmem_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,8 +20,8 @@ func TestStore_PutGetDuplicate(t *testing.T) {
 	}
 	if err := s.Put(ctx, sub); err == nil {
 		t.Fatalf("expected duplicate error")
-	} else if !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("unexpected duplicate error: %v", err)
+	} else if !errors.Is(err, stripenav.ErrAlreadyExists) {
+		t.Fatalf("duplicate error does not wrap ErrAlreadyExists: %v", err)
 	}
 	got, err := s.Get(ctx, "evt_1")
 	if err != nil || got.EventID != "evt_1" {

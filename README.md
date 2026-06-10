@@ -109,7 +109,16 @@ Implementation details:
 - **Persist-then-async**: the webhook handler verifies, persists, returns
   200, and signals the worker. The worker submits to NAV, polls
   transaction status, and retries transient failures with exponential
-  backoff (`30s` base, `15m` cap, ±20% jitter).
+  backoff (`30s` base, `15m` cap, ±20% jitter). Retriable status-poll
+  failures back off in place (keeping the NAV `transactionId`) so a
+  flaky poll never re-submits an already-submitted invoice.
+- **ACK semantics**: permanent failures (undecodable payload, unmappable
+  invoice, configuration gaps) are ACKed with 200 — a Stripe redelivery
+  would fail identically, so the error is only logged. Transient
+  failures (store unavailable, exchange-rate lookup failed) return 503
+  so Stripe's retry schedule redelivers the event; nothing was persisted,
+  so the redelivery is the only retry path. Duplicate deliveries are
+  detected via `ErrAlreadyExists` from the store and ACKed silently.
 - **Wakeup-or-sleep pacing**: the worker reacts to handler signals
   immediately and otherwise wakes on a bounded sleep — no fixed-tick
   polling. Each claimed row is driven by its own short-lived goroutine.
@@ -244,12 +253,17 @@ type SubmissionStore interface {
 
 `ClaimBatch` is the multi-replica safety primitive: it must hand out
 each row to at most one caller and grant a TTL lease so a crashed
-claimer's work becomes claimable again after the lease expires. The
-canonical Postgres implementation is
-`UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED)`. `UpdateStatus` must
-be atomic with respect to concurrent claims on the same row. Methods
-that target a specific claim (`RenewClaim`, `ReleaseClaim`) must
-return `stripenav.ErrClaimLost` if the claim is no longer held.
+claimer's work becomes claimable again after the lease expires. It must
+not return rows whose existing lease is still valid — even when the
+holder is the caller itself (a self-re-claim would spawn duplicate
+lifecycle goroutines for the row). The canonical Postgres
+implementation is `UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED)`.
+`UpdateStatus` must be atomic with respect to concurrent claims on the
+same row. Methods that target a specific claim (`RenewClaim`,
+`ReleaseClaim`) must return `stripenav.ErrClaimLost` if the claim is no
+longer held, and `Put` should wrap `stripenav.ErrAlreadyExists` for
+duplicate event ids so the handler can tell a benign redelivery from a
+store failure.
 
 A working Postgres adapter (with embedded migration, the canonical
 `SKIP LOCKED` claim query, and a multi-claimer concurrency test) lives
@@ -323,11 +337,13 @@ github.com/bancsdan/go-stripenav
      MODIFY instead of the positive reversing MODIFY that would undo
      the first credit. Net effect: NAV sees `original − 2×credit`
      instead of `original`. Silent data corruption.
-  2. **Inclusive tax behavior is dropped on credit notes.** When the
-     synthetic invoice is built from a credit note, `tax_behavior` is
-     not copied. Credit notes against Stripe Tax inclusive-priced
-     invoices (the B2C SaaS default) ship the wrong net/vat/gross
-     split and wrong VAT percentage to NAV.
+  2. **Line chain positions assume the credit note mirrors the
+     original.** NAV's `lineNumberReference` is a position in the
+     cumulative line chain (original lines first, then each
+     modification's). The original invoice's line count is unknown at
+     credit-note time, so the mapper falls back to the credit note's
+     own line count — wrong whenever the counts differ (every partial
+     credit).
   3. **`modificationIndex` is hardcoded to 1.** A second credit note
      against the same original invoice will collide with the first
      and be rejected by NAV. The correct value is `1 + count of prior
@@ -336,6 +352,13 @@ github.com/bancsdan/go-stripenav
   4. **`pre_payment` vs `post_payment` credit notes are not
      distinguished.** Áfa tv. §77 specifies different VAT-correction
      timing for the two types; the mapper treats them identically.
+- **Invoices with paginated line lists.** Stripe webhook payloads embed
+  only the first page of line items (`lines.has_more=true` marks
+  truncation, ~10+ lines). Rather than silently under-report, the
+  mapper rejects such events with `INVOICE_LINES_TRUNCATED` (logged,
+  ACKed 200). Fetching the remaining pages from the Stripe API is not
+  yet implemented — if your invoices exceed the embedded page size, they
+  will not be reported until it is.
 - **§58 subsequent-billing (utólagos számlázás).** Only the
   advance-billing rule is implemented — invoice issue date is taken as
   the tax point. Subsequent billing (invoice issued *after* the service
@@ -464,8 +487,9 @@ above. Pull requests covering any of these are welcome.
    - Split `credit_note.voided` into its own processor that emits a
      positive-amount reversing MODIFY instead of another negative
      MODIFY.
-   - Copy `tax_behavior` in `creditNoteAsInvoice` so inclusive-tax
-     credit notes don't ship the wrong amounts and rate.
+   - Fetch the original invoice (or persist its line count at CREATE
+     time) so `MapOptions.OriginalLineCount` produces correct
+     `lineNumberReference` chain positions for partial credits.
    - Compute `modificationIndex` from prior submissions for the same
      invoice via `FindByInvoiceNumber`.
    - Distinguish `pre_payment` vs `post_payment` credit notes for

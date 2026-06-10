@@ -18,6 +18,9 @@ import (
 // state machine.
 type Status string
 
+// The submission state machine's states. Pending rows await (re-)submission;
+// submitted/processing rows are in flight on NAV; accepted/rejected/aborted
+// are terminal.
 const (
 	StatusPending    Status = "pending"
 	StatusSubmitted  Status = "submitted"
@@ -30,6 +33,7 @@ const (
 // Kind tags what kind of work the submission represents.
 type Kind string
 
+// The submission kinds the bridge produces.
 const (
 	KindInvoice    Kind = "invoice"
 	KindAnnulment  Kind = "annulment"
@@ -64,6 +68,11 @@ var validTransitions = map[Status]map[Status]bool{
 		StatusRejected:  true,
 		StatusAborted:   true,
 	},
+	// Submitted/processing rows deliberately cannot return to pending:
+	// pending means "submit (again)", and a row that already carries a
+	// NAV transactionId must keep polling that transaction, not create
+	// a duplicate submission. Retriable poll failures back off in place
+	// (the worker bumps NextAttemptAt without a transition).
 	StatusSubmitted: {
 		StatusProcessing: true,
 		StatusAccepted:   true,
@@ -109,6 +118,11 @@ func (s *Submission) IsTerminal() bool {
 // event id is unknown.
 var ErrNotFound = errors.New("stripenav: submission not found")
 
+// ErrAlreadyExists is returned (wrapped) by Put when a submission with
+// the same EventID is already present. The handler relies on it to
+// tell a benign duplicate delivery apart from a store I/O failure.
+var ErrAlreadyExists = errors.New("stripenav: submission already exists")
+
 // ErrClaimLost is returned by RenewClaim and ReleaseClaim when the
 // caller's claim is no longer valid.
 var ErrClaimLost = errors.New("stripenav: claim lost")
@@ -125,9 +139,11 @@ var ErrClaimLost = errors.New("stripenav: claim lost")
 // Beyond ClaimBatch, UpdateStatus MUST be atomic per-row: concurrent
 // mutators of the same row serialise.
 type Store interface {
-	// Put inserts a new submission. It MUST fail (any non-nil error) if
-	// an entry with the same EventID already exists, so the handler can
-	// detect duplicate webhook deliveries.
+	// Put inserts a new submission. It MUST fail if an entry with the
+	// same EventID already exists, so the handler can detect duplicate
+	// webhook deliveries; the returned error SHOULD wrap
+	// ErrAlreadyExists so callers can treat the duplicate as benign
+	// (errors.Is) rather than as a store failure.
 	Put(ctx context.Context, s Submission) error
 
 	// Get returns the submission for eventID, or ErrNotFound.

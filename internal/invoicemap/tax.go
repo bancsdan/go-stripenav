@@ -9,6 +9,7 @@ import (
 // CustomerVatStatus is the NAV-required category for the customer.
 type CustomerVatStatus = string
 
+// The NAV customerVatStatus literals.
 const (
 	CustomerDomestic      CustomerVatStatus = "DOMESTIC"
 	CustomerOther         CustomerVatStatus = "OTHER"
@@ -59,7 +60,14 @@ type taxIDLike struct {
 //   - Any other EU VAT id maps to OTHER with communityVatNumber.
 //   - A non-EU business tax id maps to OTHER with thirdStateTaxId.
 //   - No id and no business name maps to PRIVATE_PERSON.
+//
+// Stripe customers can carry several tax IDs in arbitrary order, so
+// classification is by specificity, not list position: a Hungarian id
+// anywhere in the list wins over an EU id, which wins over a
+// third-state id. First-match-in-order would let a leading us_ein
+// shadow the hu_tin that makes the customer DOMESTIC.
 func classifyCustomer(taxIDs []taxIDLike, hasBusinessName bool) (status CustomerVatStatus, vat *schemas.CustomerVatData) {
+	var euVat, thirdState string
 	for _, t := range taxIDs {
 		typ := strings.ToLower(t.Type)
 		val := strings.TrimSpace(t.Value)
@@ -77,14 +85,26 @@ func classifyCustomer(taxIDs []taxIDLike, hasBusinessName bool) (status Customer
 					return CustomerDomestic, &schemas.CustomerVatData{CustomerTaxNumber: &tn}
 				}
 			}
-			return CustomerOther, &schemas.CustomerVatData{CommunityVatNumber: val}
+			if euVat == "" {
+				euVat = val
+			}
 		case "eu_oss_vat":
-			return CustomerOther, &schemas.CustomerVatData{CommunityVatNumber: val}
+			if euVat == "" {
+				euVat = val
+			}
 		default:
-			// Treat any other id type (e.g. us_ein, ca_bn) as a
-			// third-state business tax number.
-			return CustomerOther, &schemas.CustomerVatData{ThirdStateTaxID: val}
+			// Any other id type (e.g. us_ein, ca_bn) is a third-state
+			// business tax number.
+			if thirdState == "" {
+				thirdState = val
+			}
 		}
+	}
+	if euVat != "" {
+		return CustomerOther, &schemas.CustomerVatData{CommunityVatNumber: euVat}
+	}
+	if thirdState != "" {
+		return CustomerOther, &schemas.CustomerVatData{ThirdStateTaxID: thirdState}
 	}
 	if hasBusinessName {
 		return CustomerOther, nil

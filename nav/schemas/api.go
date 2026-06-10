@@ -46,16 +46,16 @@ type ManageAnnulmentResponse struct {
 
 // QueryTransactionStatusResponse mirrors the same-named NAV response.
 type QueryTransactionStatusResponse struct {
-	XMLName          xml.Name             `xml:"QueryTransactionStatusResponse"`
-	Header           CommonResponseHeader `xml:"header"`
-	Result           BasicResult          `xml:"result"`
+	XMLName           xml.Name             `xml:"QueryTransactionStatusResponse"`
+	Header            CommonResponseHeader `xml:"header"`
+	Result            BasicResult          `xml:"result"`
 	ProcessingResults ProcessingResults    `xml:"processingResults"`
 }
 
 type ProcessingResults struct {
-	ProcessingResult     []ProcessingResult `xml:"processingResult"`
-	OriginalRequestVersion string           `xml:"originalRequestVersion"`
-	AnnulmentData         *AnnulmentData    `xml:"annulmentData,omitempty"`
+	ProcessingResult       []ProcessingResult `xml:"processingResult"`
+	OriginalRequestVersion string             `xml:"originalRequestVersion"`
+	AnnulmentData          *AnnulmentData     `xml:"annulmentData,omitempty"`
 }
 
 type ProcessingResult struct {
@@ -82,9 +82,9 @@ type BusinessValidationMessage struct {
 }
 
 type ValidationPointer struct {
-	Tag        string `xml:"tag"`
-	Value      string `xml:"value,omitempty"`
-	Line       int    `xml:"line,omitempty"`
+	Tag                   string `xml:"tag"`
+	Value                 string `xml:"value,omitempty"`
+	Line                  int    `xml:"line,omitempty"`
 	OriginalInvoiceNumber string `xml:"originalInvoiceNumber,omitempty"`
 }
 
@@ -97,8 +97,8 @@ type AnnulmentData struct {
 // GeneralExceptionResponse is the body NAV returns for HTTP 4xx/5xx
 // errors that are not specific to a request type.
 type GeneralExceptionResponse struct {
-	XMLName    xml.Name `xml:"GeneralExceptionResponse"`
-	FuncCode   string   `xml:"funcCode"`
-	ErrorCode  string   `xml:"errorCode"`
-	Message    string   `xml:"message"`
+	XMLName   xml.Name `xml:"GeneralExceptionResponse"`
+	FuncCode  string   `xml:"funcCode"`
+	ErrorCode string   `xml:"errorCode"`
+	Message   string   `xml:"message"`
 }

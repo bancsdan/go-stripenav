@@ -50,10 +50,10 @@ func TestRoundToInt(t *testing.T) {
 		in   *big.Rat
 		want int64
 	}{
-		{big.NewRat(5, 2), 3},      // 2.5 -> 3
-		{big.NewRat(-5, 2), -3},    // -2.5 -> -3
-		{big.NewRat(7, 4), 2},      // 1.75 -> 2
-		{big.NewRat(1, 4), 0},      // 0.25 -> 0
+		{big.NewRat(5, 2), 3},   // 2.5 -> 3
+		{big.NewRat(-5, 2), -3}, // -2.5 -> -3
+		{big.NewRat(7, 4), 2},   // 1.75 -> 2
+		{big.NewRat(1, 4), 0},   // 0.25 -> 0
 		{big.NewRat(0, 1), 0},
 	}
 	for _, c := range cases {
@@ -65,7 +65,7 @@ func TestRoundToInt(t *testing.T) {
 }
 
 func TestToHUF(t *testing.T) {
-	amount := big.NewRat(100, 1) // 100 EUR
+	amount := big.NewRat(100, 1)   // 100 EUR
 	rate := big.NewRat(40000, 100) // 400 HUF / EUR
 	got := toHUF(amount, rate)
 	if got.Cmp(big.NewRat(40000, 1)) != 0 {

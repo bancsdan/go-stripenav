@@ -56,3 +56,32 @@ func TestInvoiceAsStorno_ResetsIssueDate(t *testing.T) {
 		t.Errorf("original line amount mutated: %d", original.Lines.Data[0].Amount)
 	}
 }
+
+// TestInvoiceAsStorno_PreservesTaxBehavior pins that the sign-flip
+// carries tax_behavior through. Without it an inclusive-tax (B2C
+// default) storno loses the gross/net distinction and the mapper
+// misstates the reversal's net by the VAT amount.
+func TestInvoiceAsStorno_PreservesTaxBehavior(t *testing.T) {
+	original := &stripe.Invoice{
+		Number:            "2026/00002",
+		StatusTransitions: &stripe.InvoiceStatusTransitions{FinalizedAt: time.Now().Unix()},
+		Lines: &stripe.InvoiceLineItemList{
+			Data: []*stripe.InvoiceLineItem{
+				{Description: "B2C service", Amount: 1_270_000, Quantity: 1,
+					Taxes: []*stripe.InvoiceLineItemTax{{
+						Amount:        270_000,
+						TaxableAmount: 1_000_000,
+						TaxBehavior:   stripe.InvoiceLineItemTaxTaxBehaviorInclusive,
+					}}},
+			},
+		},
+	}
+	clone := invoiceAsStorno(original, time.Now())
+	tax := clone.Lines.Data[0].Taxes[0]
+	if tax.TaxBehavior != stripe.InvoiceLineItemTaxTaxBehaviorInclusive {
+		t.Errorf("TaxBehavior = %q, want inclusive preserved", tax.TaxBehavior)
+	}
+	if tax.Amount != -270_000 || tax.TaxableAmount != -1_000_000 {
+		t.Errorf("tax amounts = %d/%d, want sign-flipped -270000/-1000000", tax.Amount, tax.TaxableAmount)
+	}
+}

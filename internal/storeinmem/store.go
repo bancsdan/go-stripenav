@@ -28,7 +28,8 @@ func New() *Store {
 	return &Store{rows: map[string]submission.Submission{}}
 }
 
-// Put inserts a new submission. Returns an error if eventID already exists.
+// Put inserts a new submission. Returns an error wrapping
+// submission.ErrAlreadyExists if eventID is already present.
 func (s *Store) Put(ctx context.Context, sub submission.Submission) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -36,7 +37,7 @@ func (s *Store) Put(ctx context.Context, sub submission.Submission) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.rows[sub.EventID]; exists {
-		return fmt.Errorf("storeinmem: submission %q already exists", sub.EventID)
+		return fmt.Errorf("storeinmem: submission %q: %w", sub.EventID, submission.ErrAlreadyExists)
 	}
 	s.rows[sub.EventID] = sub
 	return nil
@@ -148,15 +149,12 @@ func (s *Store) RenewClaim(ctx context.Context, eventID, claimer string, lease t
 	if !ok {
 		return submission.ErrNotFound
 	}
-	// Lease must still be ours (either unexpired or expired but unclaimed by others).
+	// Lease must still be ours. An expired-but-untaken lease is fine to
+	// renew: this models the SQL "WHERE claimed_by=$1 AND claimed_until
+	// > now()" check loosened to just claimed_by, since a single-process
+	// store has no other claimers racing to take expired rows.
 	if sub.ClaimedBy != claimer {
 		return submission.ErrClaimLost
-	}
-	if sub.ClaimedUntil.Before(now) {
-		// Lease has technically expired but no other claimer has taken it.
-		// We allow the renewal; this models the SQL "WHERE claimed_by=$1
-		// AND claimed_until > now()" check loosened to just claimed_by,
-		// since a single-process store has no other claimers.
 	}
 	sub.ClaimedUntil = now.Add(lease)
 	sub.UpdatedAt = now

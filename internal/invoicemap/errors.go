@@ -6,7 +6,9 @@ import "fmt"
 // instead of comparing strings.
 const (
 	CodeSupplierTaxNumberRequired = "SUPPLIER_TAX_NUMBER_REQUIRED"
+	CodeSupplierAddressRequired   = "SUPPLIER_ADDRESS_REQUIRED"
 	CodeInvoiceLinesEmpty         = "INVOICE_LINES_EMPTY"
+	CodeInvoiceLinesTruncated     = "INVOICE_LINES_TRUNCATED"
 	CodeInvoiceNumberMissing      = "INVOICE_NUMBER_MISSING"
 	CodeIssueDateMissing          = "ISSUE_DATE_MISSING"
 	CodeUnsupportedCurrency       = "UNSUPPORTED_CURRENCY"

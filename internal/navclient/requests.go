@@ -30,19 +30,19 @@ type invoiceOperationsXML struct {
 }
 
 type invoiceOperationXML struct {
-	Index             int    `xml:"index"`
-	InvoiceOperation  string `xml:"invoiceOperation"` // CREATE, MODIFY, STORNO
-	InvoiceData       string `xml:"invoiceData"`      // base64-encoded InvoiceData XML
+	Index            int    `xml:"index"`
+	InvoiceOperation string `xml:"invoiceOperation"` // CREATE, MODIFY, STORNO
+	InvoiceData      string `xml:"invoiceData"`      // base64-encoded InvoiceData XML
 }
 
 type manageAnnulmentRequest struct {
-	XMLName         xml.Name                `xml:"http://schemas.nav.gov.hu/OSA/3.0/api ManageAnnulmentRequest"`
-	XmlnsCom        string                  `xml:"xmlns:common,attr"`
-	Header          commonHeaderXML         `xml:"common:header"`
-	User            commonUserXML           `xml:"common:user"`
-	Software        softwareXML             `xml:"software"`
-	ExchangeToken   string                  `xml:"exchangeToken"`
-	Annulments      annulmentOperationsXML  `xml:"annulmentOperations"`
+	XMLName       xml.Name               `xml:"http://schemas.nav.gov.hu/OSA/3.0/api ManageAnnulmentRequest"`
+	XmlnsCom      string                 `xml:"xmlns:common,attr"`
+	Header        commonHeaderXML        `xml:"common:header"`
+	User          commonUserXML          `xml:"common:user"`
+	Software      softwareXML            `xml:"software"`
+	ExchangeToken string                 `xml:"exchangeToken"`
+	Annulments    annulmentOperationsXML `xml:"annulmentOperations"`
 }
 
 type annulmentOperationsXML struct {
@@ -50,9 +50,9 @@ type annulmentOperationsXML struct {
 }
 
 type annulmentOperationXML struct {
-	Index            int    `xml:"index"`
+	Index              int    `xml:"index"`
 	AnnulmentOperation string `xml:"annulmentOperation"` // ANNUL
-	InvoiceAnnulment string `xml:"invoiceAnnulment"`   // base64-encoded InvoiceAnnulment XML
+	InvoiceAnnulment   string `xml:"invoiceAnnulment"`   // base64-encoded InvoiceAnnulment XML
 }
 
 type queryTransactionStatusRequest struct {

@@ -30,8 +30,8 @@ func TestDecryptExchangeToken_RoundTrip(t *testing.T) {
 	key := []byte("0123456789ABCDEF") // 16 bytes => AES-128
 	cases := []string{
 		"short",
-		"exactly-16-bytes",                                  // exactly one block — PKCS#7 still adds a full block
-		"74ec2947-23a0-4730-b428-62f8d1f8e0ca5EE6BOUQ8Q21",  // 48 chars, the NAV token shape we saw in production logs
+		"exactly-16-bytes", // exactly one block — PKCS#7 still adds a full block
+		"74ec2947-23a0-4730-b428-62f8d1f8e0ca5EE6BOUQ8Q21", // 48 chars, the NAV token shape we saw in production logs
 	}
 	for _, plain := range cases {
 		t.Run(plain, func(t *testing.T) {
