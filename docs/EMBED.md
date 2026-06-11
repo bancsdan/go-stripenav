@@ -2,9 +2,10 @@
 
 If your backend is already a Go service, you can mount the bridge as
 just another `http.Handler` on your existing `net/http` (or chi, gin,
-echo, etc.) router. The container in
-[`DEPLOY.md`](./DEPLOY.md) is one specific way to package the same
-library — this page covers the in-process integration.
+echo, etc.) router. The standalone container packaging of the same
+library lives in the
+[stripenav service repo](https://github.com/bancsdan/stripenav) — this
+page covers the in-process integration.
 
 When to embed vs. deploy the container:
 
@@ -14,7 +15,7 @@ When to embed vs. deploy the container:
 | Your backend isn't Go | impossible | the only option |
 | You already have a webhook endpoint pattern | reuse it | duplicate ops |
 | You want a shared `http.Client` / logger / tracer | embed | sidecar lifecycle |
-| You want a real, durable `SubmissionStore` | embed and bring your own | container ships only the in-memory store |
+| You want a real, durable `SubmissionStore` | embed and bring your own | the service repo ships a Postgres adapter |
 
 ## Minimum integration
 
@@ -57,6 +58,10 @@ func main() {
                 CountryCode: "HU",
                 PostalCode:  "1011",
                 City:        "Budapest",
+                // Street + number. Required: NAV's simpleAddress
+                // demands a non-blank additionalAddressDetail, and the
+                // mapper rejects an incomplete supplier address.
+                AdditionalDetail: "Fő utca 1.",
             },
         },
         Store: myProductionStore, // see "Implementing SubmissionStore" below
@@ -80,17 +85,30 @@ drives each submission through NAV.
 ## Implementing `SubmissionStore`
 
 Production deployments must implement `stripenav.SubmissionStore`
-against durable storage. The interface is small:
+against durable storage:
 
 ```go
 type SubmissionStore interface {
     Put(ctx context.Context, s Submission) error
     Get(ctx context.Context, eventID string) (Submission, error)
     UpdateStatus(ctx context.Context, eventID string, mut func(*Submission) error) error
-    ListPending(ctx context.Context, before time.Time, limit int) ([]Submission, error)
+    ClaimBatch(ctx context.Context, claimer string, limit int, lease time.Duration) ([]Submission, error)
+    RenewClaim(ctx context.Context, eventID, claimer string, lease time.Duration) error
+    ReleaseClaim(ctx context.Context, eventID, claimer string) error
     FindByInvoiceNumber(ctx context.Context, invoiceNumber string) ([]Submission, error)
 }
 ```
+
+Contract highlights (the full rules are on the interface's godoc):
+
+- `Put` must fail for an existing `EventID`, wrapping
+  `stripenav.ErrAlreadyExists` so the handler can tell a duplicate
+  delivery from a store outage.
+- `ClaimBatch` must hand each due row to at most one claimer, with a
+  TTL lease — and must not return rows whose lease is still valid,
+  even when the holder is the caller itself.
+- `RenewClaim`/`ReleaseClaim` return `stripenav.ErrClaimLost` when the
+  claim is no longer held.
 
 A Postgres sketch:
 
@@ -109,14 +127,16 @@ CREATE TABLE stripenav_submissions (
     issued_at         TIMESTAMPTZ NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL,
     updated_at        TIMESTAMPTZ NOT NULL,
-    raw_event         BYTEA NOT NULL
+    raw_event         BYTEA NOT NULL,
+    claimed_by        TEXT NOT NULL DEFAULT '',
+    claimed_until     TIMESTAMPTZ
 );
 
 CREATE INDEX stripenav_submissions_invoice_number_idx
     ON stripenav_submissions(invoice_number);
 
-CREATE INDEX stripenav_submissions_pending_idx
-    ON stripenav_submissions(status, next_attempt_at)
+CREATE INDEX stripenav_submissions_claimable_idx
+    ON stripenav_submissions(next_attempt_at)
     WHERE status IN ('pending', 'submitted', 'processing');
 ```
 
@@ -144,8 +164,10 @@ func (s *PgStore) UpdateStatus(ctx context.Context, eventID string,
 }
 ```
 
-`ListPending` should use `SELECT … FOR UPDATE SKIP LOCKED` if you want
-to scale workers horizontally without coordination.
+`ClaimBatch` is where multi-replica safety lives: implement it as
+`UPDATE … FROM (SELECT … FOR UPDATE SKIP LOCKED)` setting
+`claimed_by`/`claimed_until`, and replicas scale horizontally without
+any extra coordination.
 
 ## Logging and metrics
 
@@ -163,7 +185,10 @@ cfg := stripenav.Config{
 
 ```go
 type MetricsRecorder interface {
-    RecordSubmissionResult(status string)              // "accepted", "rejected", "aborted"
+    // statuses: "accepted", "rejected", "aborted" (parent terminally
+    // failed), plus the "deadline_exceeded" alarm event emitted when a
+    // still-unreported submission crosses NAV's 24-hour window.
+    RecordSubmissionResult(status string)
     RecordLatency(op string, d time.Duration)          // "submit", "status"
 }
 ```
@@ -188,16 +213,17 @@ if err != nil {
 
 ## Worker lifecycle
 
-If you run multiple replicas of your service, only one worker should
-process each submission at a time. Two options:
+Every replica can safely run its worker: rows are claimed through
+`SubmissionStore.ClaimBatch` with a TTL lease, so replicas process
+disjoint work and a crashed replica's claims become available again
+after the lease expires. No leader election or external coordination is
+needed — but your store implementation must honour the `ClaimBatch`
+contract above (the bundled in-memory store and the service repo's
+Postgres adapter both do).
 
-1. Run the worker in one replica (set `Config.DisableWorker = true`
-   everywhere else, run one separate "worker pod"). Cleanest.
-2. Let every replica run a worker and rely on the store's
-   `FindByInvoiceNumber`/`UpdateStatus` to claim work atomically
-   (`FOR UPDATE SKIP LOCKED`). More complex; needed only at scale.
-
-Until you reach that scale, option 1 is fine.
+One caveat at scale: NAV rate-limits per source IP, and replicas behind
+one NAT gateway share an IP — see the README's "Multi-replica
+deployments" section for how to split the rate budget.
 
 ## Graceful shutdown
 
@@ -216,7 +242,6 @@ if err := h.Shutdown(ctx); err != nil {
 ## See also
 
 - `pkg.go.dev/github.com/bancsdan/go-stripenav` — full API reference.
-- `cmd/gostripenav/main.go` — the in-tree binary that wires everything
-  with env-var config. Same code as the container image.
-- `docs/DEPLOY.md` — the container deployment path if you don't want to
-  embed.
+- The [stripenav service repo](https://github.com/bancsdan/stripenav) —
+  standalone container packaging of this library (env-var config,
+  Postgres store) if you don't want to embed.

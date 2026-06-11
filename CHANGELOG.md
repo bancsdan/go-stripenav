@@ -57,22 +57,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   endpoint.
 - `stripenav.Config` — single struct for Stripe-side, NAV-side, supplier,
   store, exchange-rate, logging, metrics, and clock configuration.
-- `mapping` package: pure Stripe `Invoice` → NAV `InvoiceData` translation,
-  Hungarian VAT-number splitting, customer-category classification
-  (DOMESTIC / OTHER / PRIVATE_PERSON), big.Rat-based monetary aggregation
-  with HUF summary fallback, and typed `*MappingError` results.
-- `nav` package: client for NAV Online Számla v3.0 covering
-  `tokenExchange` (with AES-128-ECB token decryption + 30s-buffer cache),
-  `manageInvoice`, `manageAnnulment`, `queryTransactionStatus`. Includes
-  SHA-512 password hash and SHA3-512 request signing, typed `*NAVError`
-  responses with retriability classification, and `MaxBatchSize` guard.
+- Stripe `Invoice` → NAV `InvoiceData` translation (in
+  `internal/invoicemap`): Hungarian VAT-number splitting,
+  customer-category classification (DOMESTIC / OTHER / PRIVATE_PERSON),
+  big.Rat-based monetary aggregation with HUF summary rendering, and
+  typed `*MappingError` results. The consumer-facing `Supplier` and
+  `Address` types live in the public `mapping` package.
+- NAV Online Számla v3.0 client (in `internal/navclient`, configured
+  via the public `nav.Config`) covering `tokenExchange` (AES-128-ECB
+  token decryption; tokens are single-use, deliberately uncached),
+  `manageInvoice`, `manageAnnulment`, `queryTransactionStatus`.
+  Includes SHA-512 password hash and SHA3-512 request signing, typed
+  `*nav.NAVError` responses with retriability classification,
+  `MaxBatchSize` guard, and a 1 req/s token-bucket rate limiter
+  matching NAV's per-source-IP ceiling.
 - `Submission` state machine (pending → submitted → processing →
-  accepted / rejected / aborted), `SubmissionStore` interface,
-  `InMemoryStore` reference implementation.
-- `Worker` driving retries with exponential backoff (±20% jitter) and a
-  hard 24-hour NAV reporting deadline; pluggable `MetricsRecorder` and
-  `Clock` hooks.
-- `examples/nethttp-server` showing minimal integration with
-  environment-variable configuration and graceful shutdown.
-- Test coverage: ≈81% (`mapping`), ≈69% (`nav`), ≈69%
-  (root `stripenav`); race-clean under `go test ./... -race`.
+  accepted / rejected / aborted), `SubmissionStore` interface, and an
+  internal in-memory reference store used automatically when
+  `Config.Store` is nil (dev/test only — state is lost on restart).
+- `Worker` driving retries with exponential backoff (±20% jitter),
+  claim/lease-based multi-replica safety, parent-dependency tracking
+  for stornos, and a 24-hour reporting-deadline alarm; pluggable
+  `MetricsRecorder` and `Clock` hooks.
+- `docs/EMBED.md` integration guide; e2e suite against the real NAV
+  test environment (`-tags=navtest`); race-clean under
+  `go test ./... -race`.

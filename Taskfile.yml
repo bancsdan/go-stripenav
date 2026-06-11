@@ -28,7 +28,10 @@ tasks:
     desc: Run E2E tests against the NAV test environment. Reads e2e/.env (gitignored) for creds; in CI, the same env vars are set from repo secrets, no file required.
     dotenv: ['e2e/.env']
     cmds:
-      - '{{.GO}} test -tags=navtest -count=1 -v ./e2e/... -timeout=180s'
+      # 1800s matches CI: a single submission may legitimately wait
+      # ~150s for NAV's test env, and the suite runs 8 tests through a
+      # 1 req/s rate limiter.
+      - '{{.GO}} test -tags=navtest -count=1 -v ./e2e/... -timeout=1800s'
 
   vet:
     desc: Run go vet
