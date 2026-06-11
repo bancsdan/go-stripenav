@@ -495,6 +495,18 @@ review round-trip:
   don't need surrounding refactors. One-shot helpers don't need
   abstractions. Three similar lines beats a premature abstraction.
 
+### Releases
+
+Versioning is automated with
+[Release Please](https://github.com/googleapis/release-please): every
+push to `main` updates a rolling release PR that accumulates the
+pending Conventional Commits. Merging that PR bumps the version
+(`fix:` → patch, `feat:` → minor, `!`/`BREAKING CHANGE:` → minor while
+pre-1.0), rewrites `CHANGELOG.md`, and pushes the `vX.Y.Z` git tag that
+Go module consumers resolve. Don't hand-edit `CHANGELOG.md` for code
+changes — write a good commit subject instead; that's what ends up in
+the changelog.
+
 ## Roadmap
 
 Rough order of upcoming work, surfaced from the known limitations

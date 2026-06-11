@@ -1,0 +1,29 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Maintains a rolling release PR from Conventional Commits on
+      # main. Merging that PR bumps the manifest, rewrites
+      # CHANGELOG.md, and pushes the vX.Y.Z tag (via a GitHub Release —
+      # the Release itself is decoration; the tag is what Go module
+      # consumers resolve).
+      #
+      # Known GITHUB_TOKEN limitation: the release PR itself does not
+      # trigger the ci.yml pull_request workflow (events from the
+      # default token don't fan out). CI still runs on the push to main
+      # when the PR merges. If pre-merge CI on the release PR ever
+      # matters, switch to a PAT or close/reopen the PR by hand.
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
