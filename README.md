@@ -8,9 +8,10 @@
 Go library that bridges Stripe webhook events to Hungary's NAV
 [Online Számla v3.0](https://onlineszamla.nav.gov.hu/) invoice reporting API.
 
-Embed it in your existing Go backend to satisfy NAV's mandatory invoice
-reporting (24 hours from issuance, 4 hours for automated systems) without
-re-issuing every Stripe invoice through a third-party invoicing service.
+Embed it in your existing Go backend to satisfy NAV's mandatory
+invoice-data reporting (immediate, automatic reporting for
+software-issued invoices) without re-issuing every Stripe invoice
+through a third-party invoicing service.
 
 **Don't write Go?** A ready-to-deploy container of the same logic lives at
 [bancsdan/stripenav](https://github.com/bancsdan/stripenav). Run the
@@ -63,6 +64,9 @@ func main() {
                 CountryCode: "HU",
                 PostalCode:  "1011",
                 City:        "Budapest",
+                // Street + number. Required — NAV's simpleAddress
+                // demands a non-blank additionalAddressDetail.
+                AdditionalDetail: "Fő utca 1.",
             },
         },
         // Store left nil: the bridge falls back to an internal in-memory
@@ -92,7 +96,7 @@ On the Stripe side, register a webhook endpoint at
 | --- | --- |
 | `invoice.finalized` | NAV `manageInvoice` operation `CREATE` |
 | `invoice.voided`, `invoice.marked_uncollectible` | NAV `manageInvoice` operation `STORNO` (mirror invoice with negative amounts referencing the original) |
-| `credit_note.created` | NAV `manageInvoice` operation `MODIFY` — works for a single credit note against an invoice with exclusive-tax pricing; otherwise see limitations |
+| `credit_note.created` | NAV `manageInvoice` operation `MODIFY` — works for a single credit note whose lines mirror the original 1:1; otherwise see limitations |
 | `credit_note.voided` | **Currently produces a duplicate negative MODIFY instead of a reversing MODIFY — see limitations** |
 | out-of-band admin call | NAV `manageAnnulment` via `(*BridgeHandler).AnnulInvoice` |
 
@@ -122,13 +126,13 @@ Implementation details:
 - **Wakeup-or-sleep pacing**: the worker reacts to handler signals
   immediately and otherwise wakes on a bounded sleep — no fixed-tick
   polling. Each claimed row is driven by its own short-lived goroutine.
-- **Multi-replica safe**: rows are claimed via
-  `SELECT … FOR UPDATE SKIP LOCKED` with a TTL lease, so multiple
-  replicas process disjoint work and crashed claims are recovered
-  automatically. If lease renewal fails mid-flight (the claim was
-  stolen, the store dropped the row, etc.) the lifecycle goroutine
-  aborts immediately rather than continuing to write under a stale
-  claim.
+- **Multi-replica safe**: rows are claimed through the store's
+  `ClaimBatch` with a TTL lease (the canonical Postgres implementation
+  is `SELECT … FOR UPDATE SKIP LOCKED`), so multiple replicas process
+  disjoint work and crashed claims are recovered automatically. If
+  lease renewal fails mid-flight (the claim was stolen, the store
+  dropped the row, etc.) the lifecycle goroutine aborts immediately
+  rather than continuing to write under a stale claim.
 - **Outbound rate limiting**: every NAV API call goes through a
   per-client token-bucket limiter at 1 request/second (matching NAV's
   documented per-source-IP ceiling) with burst 1. Override via
@@ -141,7 +145,7 @@ Implementation details:
   zone — CEST. This matches Hungarian local time for ~7 months/year
   and drifts by an hour during CET (late October through late March),
   producing at most a one-day shift for invoices finalized in the
-  23:00–00:00 UTC window. The trade-off — fixed offset versus a real
+  22:00–23:00 UTC window. The trade-off — fixed offset versus a real
   tzdata lookup — keeps the binary self-contained.
 - **Parent dependency tracking**: a STORNO submission waits for its
   parent CREATE to be `accepted` on NAV's side before submitting.
@@ -176,26 +180,35 @@ Implementation details:
 ### Multi-replica deployments and NAV's rate limit
 
 NAV's rate limit is **per source IP**, not per technical user or per
-process. In the typical cloud deployment pattern — ECS Fargate or EKS
-pods running in private subnets with outbound traffic routed through
-a NAT Gateway — every replica appears to NAV as the *same* IP (the
-NAT Gateway's Elastic IP). Multi-AZ setups give you one EIP per AZ,
-but tasks aren't pinned to AZs, so you generally can't predict which
-EIP a given request will egress from. The library's built-in limiter
-is per-process, so N replicas at 1 req/s collectively hit NAV at N
-req/s — and NAV will start returning 429s as soon as you scale past
-one instance. You have a few options, in order of pragmatism:
+process. In the typical cloud deployment pattern — containers or pods
+in private subnets with outbound traffic routed through a managed NAT —
+every replica appears to NAV as the *same* IP. This holds on every
+major cloud:
+
+- **AWS**: ECS / EKS behind a NAT Gateway — all tasks egress from the
+  NAT Gateway's Elastic IP. Multi-AZ gives one EIP per AZ, but tasks
+  aren't pinned to AZs, so you can't predict which EIP a request uses.
+- **GCP**: GKE / Cloud Run behind Cloud NAT — replicas share the
+  Cloud NAT IP pool.
+- **Azure**: AKS / Container Apps egressing through a NAT Gateway or a
+  load balancer's outbound SNAT — replicas share the outbound public
+  IP(s).
+
+The library's built-in limiter is per-process, so N replicas at
+1 req/s collectively hit NAV at N req/s — and NAV will start throttling
+as soon as you scale past one instance. You have a few options, in
+order of pragmatism:
 
 1. **Divide the budget per replica.** Set
    `nav.Config.RateLimit = 1.0 / N` for an N-replica deployment.
    Wasteful when some replicas are idle, and N needs updating when
    you scale, but zero new infrastructure.
 2. **Distributed rate limiter.** Wrap the NAV client with a
-   shared-state limiter (Redis token bucket, DynamoDB counter,
+   shared-state limiter (a Redis token bucket, a database counter,
    etc.). The library doesn't ship this, but the `*http.Client` on
    `nav.Config.HTTPClient` is the right place to plug in a
    middleware that does the global enforcement.
-3. **Egress sidecar.** Route NAV traffic through a single proxy
+3. **Egress proxy.** Route NAV traffic through a single proxy
    (Envoy, HAProxy, an API gateway) that does the rate limiting
    upstream of your replicas, and set `DisableRateLimit=true` on
    every replica. Useful if you already run a service mesh.
@@ -280,8 +293,10 @@ Copy or vendor it if you want the same shape.
 ```
 github.com/bancsdan/go-stripenav
 ├── stripenav.go            // Handler + Config + Shutdown + AnnulInvoice
-├── submission.go           // Submission, SubmissionStore, state machine
-├── worker.go               // background worker, retries, deadline, parent deps
+├── submission.go           // Submission/SubmissionStore re-exports (type
+│                           //   aliases over internal/submission)
+├── worker.go               // background worker, retries, deadline alarm,
+│                           //   parent deps
 ├── credit_note.go          // invoice → storno + credit-note synthesis
 ├── mapping/                // PUBLIC: Supplier, Address (Config fields only)
 │   └── types.go
@@ -299,11 +314,11 @@ github.com/bancsdan/go-stripenav
 │   │   ├── token.go
 │   │   ├── requests.go
 │   │   └── errors.go
-│   └── invoicemap/         // Stripe → NAV translation (pure, no I/O)
-│       ├── mapping.go      // MapInvoice, MapOptions, Operation
-│       ├── tax.go          // Hungarian VAT-number splitting, customer category
-│       ├── currency.go     // big.Rat amounts, HUF summary
-│       └── errors.go
+│   ├── invoicemap/         // Stripe → NAV translation (pure, no I/O)
+│   │   ├── mapping.go      // MapInvoice, MapOptions, Operation
+│   │   ├── tax.go          // Hungarian VAT-number splitting, customer category
+│   │   ├── currency.go     // big.Rat amounts, HUF summary
+│   │   └── errors.go
 │   ├── storeinmem/         // internal in-memory SubmissionStore (default
 │   │                       //   when Config.Store is nil; dev/test only)
 │   └── submission/         // Submission, Store interface, status/kind
@@ -311,6 +326,7 @@ github.com/bancsdan/go-stripenav
 ├── e2e/                    // end-to-end harness against real NAV test env
 │                           // (//go:build navtest — skipped in default test run)
 └── docs/
+    ├── EMBED.md            // in-process integration guide
     └── nav-api-samples/    // NAV-published sample requests for reference
 ```
 
