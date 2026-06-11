@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.4.0](https://github.com/bancsdan/go-stripenav/compare/v0.3.0...v0.4.0) (2026-06-11)
+
+
+### Added
+
+* **mapping:** support §58 periodic settlement for subscriptions ([356a6f0](https://github.com/bancsdan/go-stripenav/commit/356a6f0378e0e0fe8edb53853a6fc5c5b1fc3e79))
+* **nav:** rate-limit outbound requests to 1/s by default ([8671ae1](https://github.com/bancsdan/go-stripenav/commit/8671ae10ec679df01175d16709e6569d482a4e7c))
+
+
+### Fixed
+
+* address review findings across worker, mapping, and credit-note paths ([bc97ca0](https://github.com/bancsdan/go-stripenav/commit/bc97ca0d27a5978287ae137335d3983f89424a42))
+* close storno/credit-note gaps the truncation guard and FX anchoring left open ([29a5f41](https://github.com/bancsdan/go-stripenav/commit/29a5f417bda549451eca862309401d90268bce7f))
+* **credit_note:** give STORNO its own issue date ([f89ae81](https://github.com/bancsdan/go-stripenav/commit/f89ae81a3b0b465f20f21fbfa55221d232622995))
+* **mapping:** handle Stripe Tax inclusive pricing and reconcile rounding ([a057fb9](https://github.com/bancsdan/go-stripenav/commit/a057fb98de6c1bdc4ef7d4258b4a8498e205ab60))
+* **mapping:** render NAV date fields in Hungarian calendar (UTC+2) ([f8630f8](https://github.com/bancsdan/go-stripenav/commit/f8630f81984cb871989ee037e05e031a24e08a99))
+* **navclient:** use stdlib crypto/sha3 instead of golang.org/x/crypto/sha3 ([1850aa8](https://github.com/bancsdan/go-stripenav/commit/1850aa8cce631bca7bfb478dc82204ad552d165b))
+* resolve full code-review findings — poll requeue, ACK semantics, mapping edge cases ([1851a0f](https://github.com/bancsdan/go-stripenav/commit/1851a0fc788f5492f4af03aa1b2f88270d7e0730))
+* **storeinmem:** don't re-claim rows we already hold ([e442662](https://github.com/bancsdan/go-stripenav/commit/e44266227a1fcbb4aba542e7470028903bdae409))
+* **worker:** cancel lifecycle when lease renewal fails ([6730270](https://github.com/bancsdan/go-stripenav/commit/6730270554efe3eac6a711d24aad2a4a08971a04))
+* **worker:** don't warn on context cancellation during shutdown ([34dc71b](https://github.com/bancsdan/go-stripenav/commit/34dc71b8ee4143e74b38a7bc54a0794e6db04f4f))
+* **worker:** keep retrying past the 24h reporting deadline instead of aborting ([409cc04](https://github.com/bancsdan/go-stripenav/commit/409cc04a04494c0877735b86b9a42ddfbabd6078))
+* **worker:** surface NAV validation messages on ABORTED ([b15089e](https://github.com/bancsdan/go-stripenav/commit/b15089ec1b2e1b0fa6ffc4d1bb98c03febdfaa74))
+* **worker:** wait for lease-renew goroutine before releasing claim ([88c2be6](https://github.com/bancsdan/go-stripenav/commit/88c2be68a5146fb250a4428aabb95ec2bd4b3da4))
+
+
+### Documentation
+
+* bring EMBED.md and CHANGELOG in line with the current API ([9a9e114](https://github.com/bancsdan/go-stripenav/commit/9a9e114686946dac3df9cd42bee70c8f6d415e55))
+* **readme:** add Contributing and Roadmap sections ([9d51808](https://github.com/bancsdan/go-stripenav/commit/9d51808a884649db634ebfcb38d7003f0d32bdfe))
+* **readme:** explain NAV's per-IP rate limit for multi-replica setups ([b0b0115](https://github.com/bancsdan/go-stripenav/commit/b0b011597aa0c84a7a3a5edfc85c122220b05b64))
+* **readme:** fix inconsistencies and make the multi-replica section cloud-neutral ([410b5bc](https://github.com/bancsdan/go-stripenav/commit/410b5bce29a8c596519975ce840cbc59bd04929a))
+* **readme:** flag credit_note.* handling as broken ([b281f01](https://github.com/bancsdan/go-stripenav/commit/b281f01a4da381e4d37d5da1b22597c1ed1a2ab9))
+* **readme:** refresh for claim-based store, worker pacing, e2e harness ([c2fcee3](https://github.com/bancsdan/go-stripenav/commit/c2fcee368f744144cc32d1d96566456914804956))
+
+
+### Changed
+
+* default Config.Store to internal in-memory store; hide storeinmem ([f593dbe](https://github.com/bancsdan/go-stripenav/commit/f593dbede24baf43726f1014e6a4080361b5afc8))
+* hide NAV client and mapping internals behind internal/ ([c89ad34](https://github.com/bancsdan/go-stripenav/commit/c89ad34f4f503d44bfe01b8919e7a26e4cca9c5d))
+* **mapping:** detect §58 periodicity via period span ([2f82f62](https://github.com/bancsdan/go-stripenav/commit/2f82f625afc5f24501d4698c37abce8785fa2c70))
+
+## Changelog
+
 All notable changes to this project are documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
