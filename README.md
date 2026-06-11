@@ -17,6 +17,12 @@ through a third-party invoicing service.
 [bancsdan/stripenav](https://github.com/bancsdan/stripenav). Run the
 container, point your Stripe webhook at it, done.
 
+> **AI-generated, human-controlled.** This codebase is written with AI
+> (Claude Code); a human maintainer directs the design, reviews every
+> change, and gates every release. Behaviour is verified by the unit
+> suite and by end-to-end tests against NAV's real test environment on
+> every push.
+
 ## Install
 
 ```bash
